@@ -83,6 +83,15 @@ first-primary and no-normalization rules, and separate windows keep independent
 rings across focus changes. Visual `o` flips every selection, as `vis-selection-flip`
 already did.
 
+The remaining non-viewport native actions are routed: cross-line
+`to_left`/`to_right`/`till_left`/`till_right` character searches (including their
+`;`/`,`/`totill` repeats), selection case operators (`gU`, `gu`, `g~` and the
+`vis-selections-case-*` actions) with Unicode simple case mapping, and word
+searches through the native action names. Wrapped word searches can now match at
+position 0, so `n`/`*` from the document start behave like native search.
+Viewport actions (redraw, page/slide/halfpage, screen-line and window-line
+motions) and the named suspend continuation remain.
+
 The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
 Running shell process groups respond to external SIGINT/SIGTERM with bounded
@@ -140,6 +149,15 @@ Known compatibility differences and limits:
   Conflict checks are best effort, not filesystem locks.
 * Width and combining tables approximate the original `wcwidth` behavior. The
   motion differential corpus verifies ASCII/control inputs, not full Unicode.
+* Multiple-cursor insertion keeps the original primary selection, while C's
+  insertion loop leaves the newest selection primary. Inserted bytes and every
+  selection match; after e.g. `<C-j>` then `iTEXT<Escape>`, ordered primary
+  state can differ.
+* Native word search treats the word literally; C interpolates it into a
+  `[[:<:]]…[[:>:]]` expression, so a word containing regex metacharacters is
+  matched literally here. Character case mapping keeps a character unchanged
+  when its Unicode mapping would change the byte length, where C leaves the
+  selection to its length-preserving `mbstowcs`/`wcstombs` round trip.
 
 Run the interactive editor or a batch transformation:
 
@@ -287,12 +305,15 @@ default build until those acceptance gates and platform/release work are done.
 
 The named-action catalogue now tracks all 178 entries in C's `KEY_ACTION_LIST`,
 with typed handlers and arguments rather than key-string aliases. Recognition
-and implementation are separate: the current inventory reports 90 implemented,
-60 conditional and 28 unsupported actions. A hundred and four bounded
-native-action cases match document bytes, every selection, orientation, primary
-selection and mode before and after Escape, with no unsupported requests; this
-does not establish coverage of all 178 actions. Unsupported requested cases make
-the strict differential fail.
+and implementation are separate: the current inventory reports 95 implemented,
+64 conditional and 19 unsupported actions. Every unsupported entry is a
+viewport operation (redraw, page/slide/halfpage, screen-line and window-line
+motions) except `vis-suspend`; all other native names are routed, and the
+remaining conditional ones are mode restrictions rather than missing handlers.
+Bounded native-action cases match document bytes, every selection, orientation,
+primary selection and mode before and after Escape, with no unsupported
+requests; this does not establish coverage of all 178 actions. Unsupported
+requested cases make the strict differential fail.
 
 Linewise visual selections now store their full geometry in the editor rather
 than expanding ranges during rendering from the global mode. The shared view
@@ -330,3 +351,17 @@ all-feature/all-target suite, the standard-library-only suite, strict Clippy
 (default and no-default features) and formatting pass; the key sweeps remain
 108 pass/4 upstream exclusions (core) and 111 pass/1 exclusion (Lua), and the
 native-action differential reports 104 pass with no unsupported cases.
+
+## Native action completion checkpoint (2026-10-26, macOS arm64)
+
+Cross-line character searches, selection case operators and native word-search
+actions are routed, leaving only viewport operations and the named suspend
+continuation unsupported (95 implemented, 64 conditional, 19 unsupported). The
+native-action differential reports 118 pass, zero failures and zero unsupported
+requests against C, covering the new find, case (ASCII, multibyte and invalid
+UTF-8) and wrapped-search cases. Word-search helpers now accept a match at the
+search origin, matching native wrapped search; the full key sweeps remain 108/4
+and 111/1. All-feature and standard-library-only tests plus strict Clippy pass.
+Multi-cursor insertion primary state and literal word search stay documented
+above as open differences, and viewport actions still need a host viewport
+engine.

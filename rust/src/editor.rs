@@ -220,6 +220,46 @@ enum Operator {
     Callback(CallbackId),
 }
 
+/// Native selection case operation. C maps each wide character with
+/// `towlower`/`towupper`; mappings that would change the byte length keep the
+/// original character instead.
+#[derive(Clone, Copy, Debug)]
+pub enum CaseFold {
+    Lower,
+    Toggle,
+    Upper,
+}
+
+impl CaseFold {
+    fn apply(self, character: char) -> char {
+        match self {
+            Self::Lower => single_char(character.to_lowercase()).unwrap_or(character),
+            Self::Upper => single_char(character.to_uppercase()).unwrap_or(character),
+            Self::Toggle => match single_char(character.to_lowercase()) {
+                Some(lower) if lower != character => lower,
+                _ => single_char(character.to_uppercase()).unwrap_or(character),
+            },
+        }
+    }
+}
+
+fn single_char(mut characters: impl Iterator<Item = char>) -> Option<char> {
+    match (characters.next(), characters.next()) {
+        (Some(character), None) => Some(character),
+        _ => None,
+    }
+}
+
+/// Native character-search target: the typed character plus the movement shape
+/// remembered for `;`/`,` and the `totill` pseudo motions.
+#[derive(Clone, Copy, Debug)]
+struct Find {
+    character: char,
+    backwards: bool,
+    till: bool,
+    cross_line: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Pending {
     None,
@@ -230,6 +270,9 @@ enum Pending {
     Find {
         backwards: bool,
         till: bool,
+        /// Native `to_left`/`to_right`/`till_left`/`till_right` search the whole
+        /// document; the default `f`/`F`/`t`/`T` motions stay within the line.
+        cross_line: bool,
     },
     TextObject {
         outer: bool,
@@ -500,7 +543,7 @@ pub struct Editor {
     prompt_count: usize,
     search: String,
     search_backwards: bool,
-    last_find: Option<(char, bool, bool)>,
+    last_find: Option<Find>,
     command_keys: Vec<Key>,
     last_change: Vec<Key>,
     recording_change: bool,
@@ -1878,6 +1921,36 @@ impl Editor {
         Ok(())
     }
 
+    /// Native `ka_selections_case`: map every selection's current character
+    /// range in place. Same-length replacements keep all selection geometry;
+    /// selections with invalid UTF-8 or a length-changing mapping are skipped,
+    /// as C skips failed `mbstowcs`/`wcstombs` conversions.
+    pub fn selection_case(&mut self, fold: CaseFold) -> Result<EditorAction, EditorError> {
+        let data = self.text.to_vec();
+        let mut edits = Vec::new();
+        for range in self.jump_ranges() {
+            if range.is_empty() || range.start >= data.len() {
+                continue;
+            }
+            let Ok(slice) = std::str::from_utf8(&data[range.clone()]) else {
+                continue;
+            };
+            let changed: String = slice.chars().map(|c| fold.apply(c)).collect();
+            if changed.as_bytes() != &data[range.clone()] {
+                edits.push((range, changed.into_bytes()));
+            }
+        }
+        if edits.is_empty() {
+            return Ok(EditorAction::Continue);
+        }
+        self.text.snapshot();
+        for (range, bytes) in edits.into_iter().rev() {
+            self.text.replace(range, &bytes)?;
+        }
+        self.recording_change = true;
+        Ok(EditorAction::Continue)
+    }
+
     pub fn get_register_slots(&self, name: char) -> Vec<Vec<u8>> {
         self.register_slots
             .get(&name.to_ascii_lowercase())
@@ -3189,7 +3262,11 @@ impl Editor {
                 return Err(EditorError("invalid register".into()));
             }
             Pending::ReplaceChar => return self.replace_character(key),
-            Pending::Find { backwards, till } => {
+            Pending::Find {
+                backwards,
+                till,
+                cross_line,
+            } => {
                 let character = match key {
                     Key::Char(c) => Some(c),
                     Key::Tab => Some('\t'),
@@ -3197,10 +3274,16 @@ impl Editor {
                     Key::Ctrl(c) if c.is_ascii() => Some(((c as u8) & 0x1f) as char),
                     _ => None,
                 };
-                if let Some(c) = character {
-                    self.last_find = Some((c, backwards, till));
+                if let Some(character) = character {
+                    let find = Find {
+                        character,
+                        backwards,
+                        till,
+                        cross_line,
+                    };
+                    self.last_find = Some(find);
                     let count = self.combined_count()?;
-                    let (target, inclusive) = self.find_targets(c, backwards, till, count);
+                    let (target, inclusive) = self.find_targets(find, count);
                     return self.finish_motion(target, inclusive, false);
                 }
                 return Err(EditorError("character expected".into()));
@@ -3429,15 +3512,18 @@ impl Editor {
                 self.pending = Pending::Find {
                     backwards: matches!(key, Key::Char('F' | 'T')),
                     till: matches!(key, Key::Char('t' | 'T')),
+                    cross_line: false,
                 };
             }
             Key::Char(';' | ',') => {
-                let (c, backwards, till) = self
+                let mut find = self
                     .last_find
                     .ok_or_else(|| EditorError("no previous character search".into()))?;
+                if key == Key::Char(',') {
+                    find.backwards = !find.backwards;
+                }
                 let count = self.take_count();
-                let (target, inclusive) =
-                    self.find_targets(c, backwards ^ (key == Key::Char(',')), till, count);
+                let (target, inclusive) = self.find_targets(find, count);
                 return self.finish_motion(target, inclusive, false);
             }
             Key::Char('d' | 'c' | 'y' | '<' | '>') => {
@@ -4069,6 +4155,9 @@ impl Editor {
             }
             Key::Char('<') => return self.jumplist_navigate(-1),
             Key::Char('>') => return self.jumplist_navigate(1),
+            Key::Char('U') => return self.selection_case(CaseFold::Upper),
+            Key::Char('u') => return self.selection_case(CaseFold::Lower),
+            Key::Char('~') => return self.selection_case(CaseFold::Toggle),
             _ => {}
         }
         if matches!(key, Key::Char('j' | 'k')) {
@@ -5562,24 +5651,31 @@ impl Editor {
         Ok(EditorAction::Continue)
     }
 
-    fn find_character(&self, c: char, backwards: bool, till: bool, count: usize) -> (usize, bool) {
+    fn find_character(&self, find: Find, count: usize) -> (usize, bool) {
         let data = self.text.to_vec();
         let mut bytes = [0; 4];
-        let needle = c.encode_utf8(&mut bytes).as_bytes();
+        let needle = find.character.encode_utf8(&mut bytes).as_bytes();
         let mut pos = self.cursor;
+        if find.cross_line {
+            for _ in 0..count {
+                pos = Self::cross_line_target(&data, pos, needle, find);
+            }
+            return (pos, !find.backwards);
+        }
         for _ in 0..count {
-            let found = if backwards {
-                motion::line_find_prev(&data, pos.saturating_sub(usize::from(till)), needle)
+            let found = if find.backwards {
+                motion::line_find_prev(&data, pos.saturating_sub(usize::from(find.till)), needle)
             } else {
                 motion::line_find_next(
                     &data,
-                    pos.saturating_add(if till { 2 } else { 1 }).min(data.len()),
+                    pos.saturating_add(if find.till { 2 } else { 1 })
+                        .min(data.len()),
                     needle,
                 )
             };
             if let Some(found) = found {
-                pos = if till {
-                    if backwards {
+                pos = if find.till {
+                    if find.backwards {
                         motion::char_next(&data, found)
                     } else {
                         motion::char_prev(&data, found)
@@ -5588,10 +5684,38 @@ impl Editor {
                     found
                 };
             } else {
-                return (self.cursor, !backwards);
+                return (self.cursor, !find.backwards);
             }
         }
-        (pos, !backwards)
+        (pos, !find.backwards)
+    }
+
+    /// Native `to_left`/`to_right`/`till_left`/`till_right`: search the whole
+    /// document, starting one byte past the cursor (two when till) and clamping
+    /// the result by one character. The original position is kept on failure.
+    fn cross_line_target(data: &[u8], pos: usize, needle: &[u8], find: Find) -> usize {
+        if find.backwards {
+            let from = if find.till {
+                pos.saturating_sub(1)
+            } else {
+                pos
+            };
+            match motion::find_prev(data, from, needle) {
+                Some(hit) if find.till => motion::char_next(data, hit),
+                Some(hit) => hit,
+                None => pos,
+            }
+        } else {
+            let from = pos
+                .saturating_add(if find.till { 2 } else { 1 })
+                .min(data.len());
+            match motion::find_next(data, from, needle) {
+                Some(hit) if data.get(hit) != Some(&needle[0]) => pos,
+                Some(hit) if find.till => motion::char_prev(data, hit),
+                Some(hit) => hit,
+                None => pos,
+            }
+        }
     }
 
     fn history_move(&mut self, redo: bool, count: usize) -> Result<(), EditorError> {
@@ -5647,23 +5771,17 @@ impl Editor {
         Ok(())
     }
 
-    fn find_targets(
-        &mut self,
-        c: char,
-        backwards: bool,
-        till: bool,
-        count: usize,
-    ) -> (usize, bool) {
+    fn find_targets(&mut self, find: Find, count: usize) -> (usize, bool) {
         if self.selection_set.len() == 1 {
-            return self.find_character(c, backwards, till, count);
+            return self.find_character(find, count);
         }
         let original = self.cursor;
-        let mut primary = (self.cursor, !backwards);
+        let mut primary = (self.cursor, !find.backwards);
         self.motion_targets.clear();
         let selections = self.selection_set.selections().to_vec();
         for (index, selection) in selections.into_iter().enumerate() {
             self.cursor = selection.cursor;
-            let (cursor, inclusive) = self.find_character(c, backwards, till, count);
+            let (cursor, inclusive) = self.find_character(find, count);
             self.motion_targets.push(Selection {
                 anchor: if self.is_visual() {
                     selection.anchor

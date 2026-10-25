@@ -2013,9 +2013,6 @@ impl NativeAction {
         use NativeHandler as H;
         use NativeMotion as M;
         match (self.definition().handler, self.definition().argument) {
-            (H::SelectionsCase, _) => {
-                NativeSupport::Unsupported("Unicode selection case operators are not implemented")
-            }
             (H::Suspend, _) => {
                 NativeSupport::Unsupported("named terminal suspension has no host continuation yet")
             }
@@ -2035,14 +2032,6 @@ impl NativeAction {
                     | M::WindowLineTop,
                 ),
             ) => NativeSupport::Unsupported("requires measured viewport and display-line motions"),
-            (H::MovementKey, A::Motion(M::ToLeft | M::ToRight | M::TillLeft | M::TillRight)) => {
-                NativeSupport::Unsupported("cross-line character find motions are not implemented")
-            }
-            (H::Movement, A::Motion(M::SearchWordBackward | M::SearchWordForward)) => {
-                NativeSupport::Unsupported(
-                    "word-boundary search regex/register semantics are not implemented",
-                )
-            }
             (H::Join, _) => NativeSupport::Conditional(
                 "joining while another operator is pending is not implemented",
             ),
@@ -2129,11 +2118,24 @@ impl Editor {
                 self.pending = Pending::Find {
                     backwards: matches!(
                         movement,
-                        NativeMotion::ToLineLeft | NativeMotion::TillLineLeft
+                        NativeMotion::ToLineLeft
+                            | NativeMotion::TillLineLeft
+                            | NativeMotion::ToLeft
+                            | NativeMotion::TillLeft
                     ),
                     till: matches!(
                         movement,
-                        NativeMotion::TillLineLeft | NativeMotion::TillLineRight
+                        NativeMotion::TillLineLeft
+                            | NativeMotion::TillLineRight
+                            | NativeMotion::TillLeft
+                            | NativeMotion::TillRight
+                    ),
+                    cross_line: matches!(
+                        movement,
+                        NativeMotion::ToLeft
+                            | NativeMotion::ToRight
+                            | NativeMotion::TillLeft
+                            | NativeMotion::TillRight
                     ),
                 };
             }
@@ -2377,6 +2379,14 @@ impl Editor {
                 if self.count.take().is_none() {
                     return self.native_switch_mode(Mode::Normal);
                 }
+            }
+            (H::SelectionsCase, A::Integer(direction)) => {
+                let fold = match direction.signum() {
+                    -1 => super::CaseFold::Lower,
+                    1 => super::CaseFold::Upper,
+                    _ => super::CaseFold::Toggle,
+                };
+                return self.selection_case(fold);
             }
             (H::SelectionEnd, _) => {
                 let data = self.text.to_vec();
@@ -2699,16 +2709,14 @@ impl Editor {
             other => other,
         };
         if matches!(movement, M::TotillRepeat | M::TotillReverse) {
-            let Some((character, backwards, till)) = self.last_find else {
+            let Some(mut find) = self.last_find else {
                 return Ok(EditorAction::Continue);
             };
+            if movement == M::TotillReverse {
+                find.backwards = !find.backwards;
+            }
             let count = self.combined_count()?;
-            let (target, inclusive) = self.find_targets(
-                character,
-                backwards ^ (movement == M::TotillReverse),
-                till,
-                count,
-            );
+            let (target, inclusive) = self.find_targets(find, count);
             return self.finish_motion(target, inclusive, false);
         }
         let explicit = self.count.is_some() || self.operator_count > 1;
