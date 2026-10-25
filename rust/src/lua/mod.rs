@@ -13,8 +13,8 @@ use crate::editor::{
 use crate::style::{DrawOperation, Style};
 use crate::workspace::{Outcome, Workspace};
 use mlua::{
-    AnyUserData, Function, HookTriggers, Lua, MetaMethod, MultiValue, ObjectLike, Result, Table,
-    UserData, UserDataMethods, Value, VmState,
+    AnyUserData, Function, HookTriggers, Lua, LuaOptions, MetaMethod, MultiValue, ObjectLike,
+    Result, StdLib, Table, UserData, UserDataMethods, Value, VmState,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -129,7 +129,11 @@ impl Runtime {
         process_observer: Option<ProcessObserver>,
         process_group_observer: Option<ProcessGroupObserver>,
     ) -> Result<Self> {
-        let lua = Lua::new();
+        // Native vis opens every library, but mlua only exposes `debug` and
+        // `ffi` through its unsafe constructor, which this crate forbids.
+        // Configuration needing `debug.getinfo` therefore fails; see
+        // LUA_PORTING.md.
+        let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
         let hook_interrupt = Arc::clone(&interrupt);
         lua.set_global_hook(
             HookTriggers::new().every_nth_instruction(10_000),
@@ -2073,6 +2077,20 @@ mod tests {
         assert_eq!(NATIVE_COMMANDS, names);
     }
 
+    #[test]
+    fn unsafe_libraries_stay_unavailable_to_configuration() {
+        let dir = Directory::new("require('vis')");
+        let runtime = dir.runtime();
+        runtime
+            .eval(
+                r#"
+            assert(debug == nil)
+            local ok = pcall(function() return package.loadlib('/nonexistent', 'luaopen_x') end)
+            assert(not ok)
+            "#,
+            )
+            .unwrap();
+    }
     struct Directory(PathBuf);
     impl Directory {
         fn new(config: &str) -> Self {

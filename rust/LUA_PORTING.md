@@ -9,7 +9,13 @@ original `test/lua` / `test/vis` fixtures.
 ## Implemented boundary
 
 `mlua 0.11.6` supports the crate's Rust 1.85 minimum and Lua 5.5. The interpreter
-uses `Lua::new()`: arbitrary C-module loading and `package.loadlib` remain disabled.
+loads only the safe standard libraries (`Lua::new_with(StdLib::ALL_SAFE, …)`,
+the same set as `Lua::new()`): arbitrary C-module loading, `package.loadlib`,
+and the `debug`/`ffi` libraries remain unavailable. mlua refuses to open `debug`
+from its safe constructor, and the unsafe constructor the crate forbids is the
+only alternative, so configuration that calls `debug.getinfo` (for example the
+vis-lspc plugin) fails at load time. The global stays nil, which
+`unsafe_libraries_stay_unavailable_to_configuration` pins.
 The vendored Lua VM and mlua dependencies contain native/unsafe implementation;
 our Rust code continues to forbid unsafe code. `--no-default-features` still has
 zero Cargo dependencies; `--features lua` explicitly opts into the interpreter.
@@ -119,6 +125,11 @@ sessions without a controlling terminal remains distinct from the verified
 foreground/canonical terminal protocol. Verify startup geometry, persistent redraw
 styles, remaining automatic option overlays, file-name mutations and argument/error semantics
 against C. Passing the original eight Lua scripts is not complete API coverage.
+
+The `debug` library stays outside the safe boundary. Making common plugin uses
+work needs either a safe mlua debug surface or a curated Lua-side replacement
+for `debug.getinfo`/`traceback`; until then such plugins are rejected rather
+than silently misbehaving.
 
 The safe supervisor explicitly returns Unsupported on targets whose available
 safe OS interface cannot reserve an exited leader (`WNOWAIT` unavailable). That
