@@ -2075,7 +2075,7 @@ use super::{Editor, EditorAction, EditorError, Operator, Pending, Placement, Pro
 use crate::{
     motion,
     selection::Selection,
-    view::{last_row, position_at, row_start, row_width, screen_position},
+    view::{last_row, last_source_row, position_at, row_start, row_width, screen_position},
 };
 
 impl Editor {
@@ -2835,9 +2835,7 @@ impl Editor {
     /// screen motions keep the preferred display column.
     fn native_view_motion(&mut self, movement: NativeMotion) -> Result<EditorAction, EditorError> {
         use NativeMotion as M;
-        let viewport = self
-            .viewport
-            .ok_or_else(|| EditorError("viewport geometry is not measured yet".into()))?;
+        let viewport = self.viewport;
         let explicit = self.count.is_some() || self.operator_count > 1;
         let count = self.combined_count()?;
         // Native window motions default their count to 0 (`L` measures from
@@ -2857,10 +2855,15 @@ impl Editor {
             // The final row may hold only the EOF cursor cell.
             Some(position_at(&data, row, column, columns, tab_width).unwrap_or(data.len()))
         };
+        let source_last = last_source_row(&data, columns, tab_width);
         let locate_row = |row: usize| -> Option<usize> {
-            let row = row.min(last);
-            row_start(&data, row, columns, tab_width)
-                .or_else(|| (row == last).then_some(data.len()))
+            match source_last {
+                Some(source_last) => {
+                    let row = row.min(source_last);
+                    row_start(&data, row, columns, tab_width)
+                }
+                None => Some(data.len()),
+            }
         };
         let origin = self.cursor;
         let properties = movement.properties();
@@ -2882,7 +2885,13 @@ impl Editor {
                 }
                 M::ScreenLineDown => {
                     preferred = Some(desired);
-                    locate(row.saturating_add(count).min(last), desired).filter(|_| row < last)
+                    if row >= last {
+                        // Past the last display row native screen-line-down
+                        // falls back to the line below, which is EOF here.
+                        Some(data.len())
+                    } else {
+                        locate(row.saturating_add(count).min(last), desired)
+                    }
                 }
                 M::WindowLineTop => {
                     locate_row(viewport.top.saturating_add(count.max(1) - 1).min(last))
@@ -2916,6 +2925,35 @@ impl Editor {
             });
         }
         self.preferred_column = preferred;
+        if self.operator.is_some() && properties.linewise {
+            // Native window motions are LINEWISE without LINEWISE_INCLUSIVE:
+            // the destination line joins the range only when the destination is
+            // not already a line start, so `dH` on a line start is empty and
+            // `dL` stops before the bottom row's line.
+            let data = self.text.to_vec();
+            let ranges: Vec<_> = self
+                .selections()
+                .iter()
+                .zip(&targets)
+                .map(|(source, target)| {
+                    let start = source.cursor.min(target.cursor);
+                    let end = source.cursor.max(target.cursor);
+                    let line_start = motion::line_begin(&data, start);
+                    let line_end = if end != motion::line_begin(&data, end) {
+                        motion::line_next(&data, end)
+                    } else {
+                        end
+                    };
+                    line_start..line_end
+                })
+                .collect();
+            self.motion_targets.clear();
+            return if ranges.len() > 1 {
+                self.apply_many_operators(ranges, true)
+            } else {
+                self.apply_operator(ranges[0].clone(), true)
+            };
+        }
         self.motion_targets = targets;
         self.finish_motion(origin, properties.inclusive, properties.linewise)
     }

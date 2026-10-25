@@ -237,6 +237,20 @@ pub fn last_row(data: &[u8], columns: usize, tab_width: usize) -> usize {
     last
 }
 
+/// Index of the last row holding source cells. Native window motions clamp
+/// here rather than to the virtual EOF cursor row, so `L` in a short file lands
+/// on the last real line as C does.
+pub fn last_source_row(data: &[u8], columns: usize, tab_width: usize) -> Option<usize> {
+    let mut last = None;
+    walk_cells(data, columns.max(1), tab_width, |cell| {
+        if cell.kind != CellKind::Eof {
+            last = Some(cell.row);
+        }
+        true
+    });
+    last
+}
+
 /// Display position of the last cursor cell in a row: C's screen-line end uses
 /// `line.width - 1`, i.e. the start column of the final cell.
 pub fn row_end_column(data: &[u8], row: usize, columns: usize, tab_width: usize) -> Option<usize> {

@@ -94,8 +94,14 @@ interactive job with the terminal restored; configurations can shadow the
 binding with a normal mapping. Screen-line motions and the window-line
 `top`/`middle`/`bottom` motions use the soft-wrap cell model plus the body
 geometry the UI publishes for every drawn window, keeping the preferred
-display column across native actions. Only the viewport scroll actions
-(redraw, page, halfpage and slide) remain unsupported.
+display column across native actions. `H`/`L`, `gj`/`gk`/`gm`/`g$` and operator
+combinations now reach these actions; `M` keeps the selections-restore binding,
+which wins over the motion table in the native default order. Window motions
+extend operator ranges only to the line start of the destination row (no
+`LINEWISE_INCLUSIVE`), matching `dH`/`dL`. Until the first frame is drawn the
+motions use native vis's 80-column and 23-body-row no-terminal defaults. Only
+the viewport scroll actions (redraw, page, halfpage and slide) remain
+unsupported.
 
 The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
@@ -391,18 +397,24 @@ Screen-line begin/middle/end/up/down and window-line top/middle/bottom are
 implemented with native semantics: wrapped row starts and widths, wide-token
 column clamping, the preferred display column preserved across native actions,
 count handling (including `L`'s bottom-relative default of zero) and clamping to
-the final EOF row. Without a drawn frame the motions report that geometry is not
-measured instead of guessing. The native inventory is now 96 implemented, 72
-conditional and 10 unsupported; every unsupported name is a viewport scroll
-action (redraw, page, halfpage, slide).
+the final EOF row. Before a frame exists the editor keeps native vis's 80x23
+no-terminal geometry, so headless batch and Lua replay actions stay coherent.
+The native inventory is now 96 implemented, 72 conditional and 10 unsupported;
+every unsupported name is a viewport scroll action (redraw, page, halfpage,
+slide).
 
-Verification: six host tests in `rust/tests/viewport_motions.rs` plus view-module
-unit tests cover row lookup, counts, clamping, wrapped columns, wide tokens and
-the missing-geometry error. A startup `vis:map` of `L` to the native action
-places the cursor on the measured last row in a real PTY. Interactive default
-bindings for `H`/`M`/`L` are still absent because the port's key table remains
-incomplete; the actions work through mappings, Lua and symbolic keys. Workspace
-and terminal PTY scenarios now pass 9/9 and 10/10 after replacing the harness's
-fixed post-Escape delay with idle detection. Cargo tests in both feature
-configurations, strict Clippy and formatting pass; key sweeps stay 108/4 and
-111/1, and the native-action differential stays at 118 pass.
+Window motions clamp to the last row that holds source cells rather than the
+virtual EOF cursor row, matching native `L` in short files.
+
+Verification: eight host tests in `rust/tests/viewport_motions.rs` plus
+view-module unit tests cover row lookup, counts, source-row clamping, wrapped
+columns, wide tokens, the `H`/`L` and `gj`/`gk`/`gm`/`g$` bindings and the
+no-terminal default geometry. Real PTY comparisons against C match for `L`/`H` on
+short and full windows, `gj`/`gk`, `g$`, `gm`, `dH`, `dL`, `dj`, `dgj` and
+counted window motions. Workspace and terminal PTY scenarios pass 9/9 and 10/10
+after replacing the harness's fixed post-Escape delay with idle detection.
+Cargo tests in both feature configurations, strict Clippy and formatting pass;
+key sweeps stay 108/4 and 111/1, and the native-action differential stays at
+118 pass. The default key table is still incomplete for the remaining port
+options, so other native actions remain reachable only through mappings, Lua and
+symbolic keys.

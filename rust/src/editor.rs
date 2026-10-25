@@ -558,8 +558,9 @@ pub struct Editor {
     /// Active window's native 32-slot jump cache; the workspace moves it in and
     /// out of the focused window's saved view state.
     jumplist: JumpList<Mode>,
-    /// Body geometry the UI last measured for the focused window.
-    viewport: Option<crate::view::ViewportMetrics>,
+    /// Body geometry the UI last measured for the focused window. Until a
+    /// frame is drawn this keeps native vis's 80x23 no-terminal defaults.
+    viewport: crate::view::ViewportMetrics,
     buffer_state: BufferState,
     selected_mark: char,
     session: sam::Session,
@@ -650,7 +651,11 @@ impl Editor {
             selection_set,
             motion_targets: Vec::new(),
             jumplist: JumpList::new(),
-            viewport: None,
+            viewport: crate::view::ViewportMetrics {
+                width: 80,
+                height: 23,
+                top: 0,
+            },
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -1833,12 +1838,17 @@ impl Editor {
         self.jumplist = list;
     }
 
-    /// Install the focused window's measured body geometry.
+    /// Install the focused window's measured body geometry. `None` restores
+    /// the native no-terminal defaults (80 columns, 23 body rows).
     pub fn set_viewport(&mut self, viewport: Option<crate::view::ViewportMetrics>) {
-        self.viewport = viewport;
+        self.viewport = viewport.unwrap_or(crate::view::ViewportMetrics {
+            width: 80,
+            height: 23,
+            top: 0,
+        });
     }
 
-    pub fn viewport(&self) -> Option<crate::view::ViewportMetrics> {
+    pub fn viewport(&self) -> crate::view::ViewportMetrics {
         self.viewport
     }
 
@@ -3458,7 +3468,9 @@ impl Editor {
         if self.operator.is_some()
             && !matches!(
                 key,
-                Key::Char('g' | 'f' | 'F' | 't' | 'T' | ';' | ',' | '"' | '/' | '?')
+                Key::Char(
+                    'g' | 'f' | 'F' | 't' | 'T' | ';' | ',' | '"' | '/' | '?' | 'H' | 'M' | 'L'
+                )
             )
         {
             return Err(EditorError(
@@ -3474,9 +3486,15 @@ impl Editor {
                 let name = std::mem::replace(&mut self.selected_mark, '\'');
                 self.save_selection_mark(name)?;
             }
+            // The selections table precedes the motions table, so normal-mode
+            // `M` restores the selection mark; window-middle is action-only.
             Key::Char('M') => {
                 let name = std::mem::replace(&mut self.selected_mark, '\'');
                 self.restore_selection_mark(name, false)?;
+            }
+            Key::Char('H') => return self.invoke_native_action(NativeAction::CursorWindowLineTop),
+            Key::Char('L') => {
+                return self.invoke_native_action(NativeAction::CursorWindowLineBottom);
             }
             Key::Char('|' | '&' | '\\' | '~') => {
                 let data = self.text.to_vec();
@@ -4179,10 +4197,14 @@ impl Editor {
             Key::Char('~') => return self.selection_case(CaseFold::Toggle),
             _ => {}
         }
-        if matches!(key, Key::Char('j' | 'k')) {
-            if let Some((target, inclusive, linewise)) = self.motion(key)? {
-                return self.finish_motion(target, inclusive, linewise);
+        match key {
+            Key::Char('j') => return self.invoke_native_action(NativeAction::CursorScreenLineDown),
+            Key::Char('k') => return self.invoke_native_action(NativeAction::CursorScreenLineUp),
+            Key::Char('m') => {
+                return self.invoke_native_action(NativeAction::CursorScreenLineMiddle);
             }
+            Key::Char('$') => return self.invoke_native_action(NativeAction::CursorScreenLineEnd),
+            _ => {}
         }
         if key == Key::Char('J') {
             return self.join_with_space(false);

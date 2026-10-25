@@ -55,21 +55,25 @@ fn window_lines_clamp_at_the_end_of_the_text() {
     let mut ws = workspace(b"one\ntwo\n");
     measure(&mut ws, 10, 8, 0);
     action(&mut ws, NativeAction::CursorWindowLineBottom);
-    assert_eq!(ws.editor.cursor, 8, "the EOF row is reachable");
+    assert_eq!(
+        ws.editor.cursor, 4,
+        "clamped to the last source row, not the EOF cursor row"
+    );
 }
 
 #[test]
-fn viewport_motions_require_measured_geometry() {
-    let mut ws = workspace(b"one\ntwo\n");
-    assert!(
-        ws.handle_key(Key::Native(NativeAction::CursorWindowLineTop))
-            .is_err()
+fn undrawn_windows_use_native_no_terminal_geometry() {
+    // Native vis falls back to 80 columns and 23 body rows when no terminal
+    // size is available, so the same defaults keep headless actions coherent.
+    let mut ws = workspace(b"one\ntwo\nthree\n");
+    action(&mut ws, NativeAction::CursorWindowLineBottom);
+    assert_eq!(ws.editor.cursor, 8, "L clamps to the last source row");
+    keys(&mut ws, "gg");
+    action(&mut ws, NativeAction::CursorScreenLineEnd);
+    assert_eq!(
+        ws.editor.cursor, 3,
+        "the default 80-column row ends on the newline cell"
     );
-    assert!(
-        ws.handle_key(Key::Native(NativeAction::CursorScreenLineEnd))
-            .is_err()
-    );
-    assert_eq!(ws.editor.cursor, 0);
 }
 
 #[test]
@@ -113,4 +117,28 @@ fn screen_line_column_preference_survives_wide_tokens() {
     assert_eq!(ws.editor.cursor, 1);
     action(&mut ws, NativeAction::CursorScreenLineEnd);
     assert_eq!(ws.editor.cursor, 1, "end of the two-column row");
+}
+
+#[test]
+fn native_h_and_l_keys_use_measured_geometry() {
+    let mut ws = workspace(b"l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\n");
+    measure(&mut ws, 10, 5, 1);
+    keys(&mut ws, "H");
+    assert_eq!(ws.editor.cursor, 3, "H selects the first visible row");
+    keys(&mut ws, "L");
+    assert_eq!(ws.editor.cursor, 15, "L selects the last visible row");
+}
+
+#[test]
+fn g_screen_line_keys_move_wrapped_rows() {
+    let mut ws = workspace(b"abcdefghij");
+    measure(&mut ws, 4, 3, 0);
+    keys(&mut ws, "gj");
+    assert_eq!(ws.editor.cursor, 4, "gj moves one display row down");
+    keys(&mut ws, "gk");
+    assert_eq!(ws.editor.cursor, 0, "gk moves back up");
+    keys(&mut ws, "g$");
+    assert_eq!(ws.editor.cursor, 3, "g$ ends the display row");
+    keys(&mut ws, "gm");
+    assert_eq!(ws.editor.cursor, 2, "gm centers within the display row");
 }
