@@ -719,10 +719,9 @@ pub fn word_find_next(data: &[u8], pos: usize, word: &[u8]) -> Option<Range<usiz
     }
     let mut p = pos.min(data.len());
     loop {
+        // A match beginning exactly at the search position is a real hit: the
+        // wrapped search for `n`/`*` starts at position 0.
         let m = find_next(data, p, word)?;
-        if m == p {
-            return None;
-        }
         let r = word_object(data, m, false, false);
         if r.end.checked_sub(r.start) == Some(word.len()) {
             return Some(r);
@@ -740,9 +739,6 @@ pub fn word_find_prev(data: &[u8], pos: usize, word: &[u8]) -> Option<Range<usiz
     let mut p = pos.min(data.len());
     loop {
         let m = find_prev(data, p, word)?;
-        if m == p {
-            return None;
-        }
         let r = word_object(data, m, false, false);
         if r.end.checked_sub(r.start) == Some(word.len()) {
             return Some(r);
@@ -855,6 +851,16 @@ mod tests {
         assert_eq!(word_object(b"one  two", 4, true, false), 3..8);
     }
     #[test]
+    fn word_search_accepts_a_match_at_the_search_origin() {
+        let d = b"one two one\n";
+        assert_eq!(word_find_next(d, 0, b"one"), Some(0..3));
+        assert_eq!(word_find_next(d, 8, b"one"), Some(8..11));
+        assert_eq!(word_find_next(d, 4, b"one"), Some(8..11));
+        assert_eq!(word_find_prev(d, d.len(), b"one"), Some(8..11));
+        assert_eq!(word_find_prev(d, 8, b"one"), Some(0..3));
+        assert_eq!(word_find_next(b"two\n", 0, b"one"), None);
+    }
+    #[test]
     fn bracket_nesting_and_strings() {
         let d = b"{ a { b } \"}\" c }";
         assert_eq!(bracket_match(d, 0), Some(d.len() - 1));
@@ -895,7 +901,9 @@ mod tests {
         assert_eq!(paragraph_object(d, 2, false), 0..11);
         assert_eq!(paragraph_object(d, 11, false), 11..12);
         assert_eq!(paragraph_object(d, 2, true), 0..12);
-        assert_eq!(word_find_next(b"cat cats cat", 0, b"cat"), None);
+        // Native search can match at the search origin itself, which is how the
+        // wrapped `n` search from position 0 finds the first word.
+        assert_eq!(word_find_next(b"cat cats cat", 0, b"cat"), Some(0..3));
         assert_eq!(word_find_next(b"cat cats cat", 1, b"cat"), Some(9..12));
         assert_eq!(word_find_prev(b"cat cats cat", 9, b"cat"), Some(0..3));
     }
