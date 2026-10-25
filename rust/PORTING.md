@@ -151,10 +151,11 @@ Known compatibility differences and limits:
   Conflict checks are best effort, not filesystem locks.
 * Width and combining tables approximate the original `wcwidth` behavior. The
   motion differential corpus verifies ASCII/control inputs, not full Unicode.
-* Multiple-cursor insertion keeps the original primary selection, while C's
-  insertion loop leaves the newest selection primary. Inserted bytes and every
-  selection match; after e.g. `<C-j>` then `iTEXT<Escape>`, ordered primary
-  state can differ.
+* After a wrapped multi-cursor word search, C lists the selections in a
+  different order from the Rust set. Both expose the same selections and the
+  same primary cursor, but ordered comparison (as in the native-action
+  differential) can report the list index difference; such a case is kept out
+  of the passing corpus rather than forced.
 * Native word search treats the word literally; C interpolates it into a
   `[[:<:]]…[[:>:]]` expression, so a word containing regex metacharacters is
   matched literally here. Character case mapping keeps a character unchanged
@@ -368,8 +369,8 @@ requests against C, covering the new find, case (ASCII, multibyte and invalid
 UTF-8) and wrapped-search cases. Word-search helpers now accept a match at the
 search origin, matching native wrapped search; the full key sweeps remain 108/4
 and 111/1. All-feature and standard-library-only tests plus strict Clippy pass.
-Multi-cursor insertion primary state and literal word search stay documented
-above as open differences, and viewport actions still need a host viewport
-engine. The PTY gate now waits for the real INSERT-status transition instead of
+Wrapped multi-cursor word-search ordering and literal word search stay
+documented above as open differences, and viewport actions still need a host
+viewport engine. The PTY gate now waits for the real INSERT-status transition instead of
 a status word the native format never draws, and all ten scenarios pass with an
 isolated configuration, including suspend/resume through the new action path.
