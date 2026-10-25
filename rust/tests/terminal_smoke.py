@@ -87,12 +87,21 @@ class Session:
     def send_keys(self, data):
         # Match upstream test/util/keys: a standalone Escape is separated from
         # the next key so a native terminal can distinguish it from Meta input.
+        # Wait for the editor to go idle after each such fragment instead of a
+        # fixed delay: a slow frame (for example one that just opened a split)
+        # can otherwise coalesce Escape and the following byte into a Meta key.
         start = 0
         for match in re.finditer(rb'\x1b(?![\[\]OP^_])', data):
             self.send(data[start:match.end()])
-            deadline = time.monotonic() + 0.06
+            quiet = time.monotonic() + 0.04
+            deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
+                before = len(self.output)
                 self.read(0.01)
+                if len(self.output) != before:
+                    quiet = time.monotonic() + 0.04
+                elif time.monotonic() >= quiet:
+                    break
             start = match.end()
         if start < len(data):
             self.send(data[start:])
