@@ -20,6 +20,24 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def wait_until_insert_gone(session, message):
+    """Wait for a redrawn status line without the INSERT marker.
+
+    The standard status format renders NORMAL as an empty string, so the
+    absence of INSERT from a redraw is the observable transition back to
+    normal mode; the follow-up keys prove that interpretation.
+    """
+    deadline = time.monotonic() + 5
+    while True:
+        before = len(session.output)
+        session.read()
+        chunk = bytes(session.output[before:])
+        if chunk and b"INSERT" not in chunk:
+            return
+        assert session.process.poll() is None, "SIGINT discarded unsaved changes"
+        assert time.monotonic() < deadline, message
+
+
 class Session:
     def __init__(self, binary, path, input_data=None, capture_stdout=False):
         self.master, self.slave = os.openpty()
@@ -183,13 +201,8 @@ def run(binary):
             while b"unsaved" not in session.output:
                 session.read()
                 assert time.monotonic() < deadline
-            offset = len(session.output)
             os.kill(session.process.pid, signal.SIGINT)
-            deadline = time.monotonic() + 5
-            while b"NORMAL" not in session.output[offset:]:
-                session.read()
-                assert session.process.poll() is None, "SIGINT discarded unsaved changes"
-                assert time.monotonic() < deadline, "SIGINT did not cancel insert mode"
+            wait_until_insert_gone(session, "SIGINT did not cancel insert mode")
             # Enter after SIGINT must be interpreted in normal mode, not inserted.
             session.send_keys(b":wq\r")
             session.finish()
@@ -261,13 +274,8 @@ def run(binary):
             deadline = time.monotonic() + 0.15
             while time.monotonic() < deadline:
                 session.read(0.01)
-            offset = len(session.output)
             os.kill(session.process.pid, signal.SIGINT)
-            deadline = time.monotonic() + 5
-            while b"NORMAL" not in session.output[offset:]:
-                session.read()
-                assert session.process.poll() is None
-                assert time.monotonic() < deadline, "SIGINT did not cancel paste editing"
+            wait_until_insert_gone(session, "SIGINT did not cancel paste editing")
             session.send(b":q!\r\x1b[201~")
             session.send_keys(b"iY\x1b:wq\r")
             session.finish()
