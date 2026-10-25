@@ -1,0 +1,77 @@
+name: Rust port
+
+on: [push, pull_request]
+
+jobs:
+  core:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Format
+        run: cargo +stable fmt --manifest-path rust/Cargo.toml --check
+      - name: Lint
+        run: cargo +stable clippy --manifest-path rust/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Lint standard-library-only core
+        run: cargo +stable clippy --manifest-path rust/Cargo.toml --all-targets --locked --no-default-features -- -D warnings
+      - name: Test
+        run: cargo +stable test --manifest-path rust/Cargo.toml --all-targets --locked
+      - name: Test standard-library-only core
+        run: cargo +stable test --manifest-path rust/Cargo.toml --all-targets --locked --no-default-features
+      - name: Release build
+        run: cargo +stable build --manifest-path rust/Cargo.toml --locked --release
+      - name: Headless terminal checks
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/terminal_smoke.py --binary rust/target/release/vis-rs
+      - name: File and split-window interactions
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/workspace_smoke.py --binary rust/target/release/vis-rs
+      - name: Interrupt running subprocesses
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/subprocess_smoke.py --binary rust/target/release/vis-rs
+      - name: Native modified keys and window rendering
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/terminal_views.py --rust-vis rust/target/release/vis-rs
+      - name: History behavior against original C
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/history_differential.py
+      - name: Wrapped coordinates against original C
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/view_differential.py --library-dir rust/target/release
+      - name: Menu behavior against C
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/menu_differential.py --rust-menu rust/target/release/vis-menu-rs
+
+  lua:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust tools
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Lint optional Lua integration
+        run: cargo +stable clippy --manifest-path rust/Cargo.toml --all-features --all-targets --locked -- -D warnings
+      - name: Test optional Lua integration
+        run: cargo +stable test --manifest-path rust/Cargo.toml --all-features --all-targets --locked
+      - name: Build Lua editor and replay
+        run: cargo +stable build --manifest-path rust/Cargo.toml --features lua --examples --bins --locked
+      - name: Lua CLI and terminal integration
+        run: python3 rust/tests/lua_cli_smoke.py --binary rust/target/debug/vis-rs
+      - name: Original Lua fixture scripts
+        working-directory: test/lua
+        run: VIS="../../rust/target/debug/vis-rs" sh test.sh
+
+  minimum-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install minimum supported Rust
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Test minimum supported Rust
+        run: cargo +1.85.0 test --manifest-path rust/Cargo.toml --all-features --all-targets --locked
