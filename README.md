@@ -44,6 +44,10 @@ and clean implementation.
 Build instructions
 ------------------
 
+For the self-contained **macOS Apple Silicon quick installer** (theme, syntax
+highlighting and bundled language servers), see
+[`packaging/macos-arm64`](packaging/macos-arm64/README.md).
+
 In order to build vis you will need a
 [C99](http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf)
 compiler, a [POSIX.1-2008](http://pubs.opengroup.org/onlinepubs/9699919799/)
