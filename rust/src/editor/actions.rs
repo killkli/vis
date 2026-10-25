@@ -1974,6 +1974,29 @@ impl NativeMotion {
             },
         }
     }
+
+    /// Native JUMP movement type: the resulting position is recorded in the
+    /// per-window jump list after the motion completes.
+    fn jumps(self) -> bool {
+        matches!(
+            self,
+            Self::BlockEnd
+                | Self::BlockStart
+                | Self::ParagraphNext
+                | Self::ParagraphPrev
+                | Self::ParenthesisEnd
+                | Self::ParenthesisStart
+                | Self::SearchRepeat
+                | Self::SearchRepeatBackward
+                | Self::SearchRepeatForward
+                | Self::SearchRepeatReverse
+                | Self::SearchWordBackward
+                | Self::SearchWordForward
+                | Self::WindowLineBottom
+                | Self::WindowLineMiddle
+                | Self::WindowLineTop
+        )
+    }
 }
 
 /// Routing status is separate from recognition: every C name is recognized,
@@ -1990,9 +2013,6 @@ impl NativeAction {
         use NativeHandler as H;
         use NativeMotion as M;
         match (self.definition().handler, self.definition().argument) {
-            (H::Jumplist, _) => {
-                NativeSupport::Unsupported("saved-selection jump list is not implemented")
-            }
             (H::SelectionsCase, _) => {
                 NativeSupport::Unsupported("Unicode selection case operators are not implemented")
             }
@@ -2088,7 +2108,19 @@ impl Editor {
         use NativeArgument as A;
         use NativeHandler as H;
         match (definition.handler, definition.argument) {
-            (H::Movement, A::Motion(motion)) => return self.native_motion(motion),
+            (H::Movement, A::Motion(motion)) => {
+                let jump = motion.jumps();
+                let action = self.native_motion(motion)?;
+                if jump {
+                    self.jumplist_save();
+                }
+                return Ok(action);
+            }
+            (H::Jumplist, A::Integer(advance)) => {
+                let advance = isize::try_from(advance)
+                    .map_err(|_| EditorError("jump list advance out of range".into()))?;
+                return self.jumplist_navigate(advance);
+            }
             (H::MovementKey, A::Motion(movement)) => {
                 self.native_require_command_mode(action)?;
                 if self.queued_keys.is_empty() {
@@ -2178,7 +2210,9 @@ impl Editor {
                         cursor: target,
                     })
                     .collect();
-                return self.finish_motion(target, false, true);
+                let action = self.finish_motion(target, false, true)?;
+                self.jumplist_save();
+                return Ok(action);
             }
             (H::Insertmode | H::Replacemode, A::Motion(movement)) => {
                 let count = self.combined_count()?;
@@ -2936,6 +2970,7 @@ impl Editor {
         if old_visual && !matches!(mode, Mode::Visual | Mode::VisualLine) && self.operator.is_none()
         {
             self.save_selection_mark('^')?;
+            self.jumplist_save();
         }
         self.mode = mode;
         let visual = self.is_visual();

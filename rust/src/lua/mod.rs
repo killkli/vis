@@ -1870,14 +1870,22 @@ impl Inner {
                 return Ok(false);
             }
         };
-        if let Err(error) = self.run_plan(plan) {
-            let rejected = error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(crate::workspace::command_rejected);
-            self.messages.borrow_mut().push(error.to_string());
-            if rejected {
-                return Ok(false);
+        let completed = match self.run_plan(plan) {
+            Ok(_) => true,
+            Err(error) => {
+                let rejected = error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(crate::workspace::command_rejected);
+                self.messages.borrow_mut().push(error.to_string());
+                if rejected {
+                    return Ok(false);
+                }
+                false
             }
+        };
+        if completed {
+            let mut workspace = self.workspace.borrow_mut();
+            workspace.finish_command();
         }
         Ok(true)
     }

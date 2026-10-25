@@ -1608,6 +1608,13 @@ impl Workspace {
         self.collect_closed_buffers();
         Ok(())
     }
+    /// Native `sam_cmd` epilogue: a completed `:`-command records the focused
+    /// window's selection after handlers such as `:split` may have moved focus.
+    pub(crate) fn finish_command(&mut self) {
+        if !self.windows.is_empty() {
+            self.editor.jumplist_save();
+        }
+    }
     pub(super) fn drive_without_events(&mut self, mut plan: HostPlan) -> io::Result<Outcome> {
         loop {
             match self.advance(&mut plan, true) {
@@ -1640,6 +1647,7 @@ impl Workspace {
                             plan.outcome = self
                                 .drive_without_events(next)
                                 .unwrap_or_else(|error| Outcome::Message(error.to_string()));
+                            self.finish_command();
                             true
                         }
                         Err(error) => {

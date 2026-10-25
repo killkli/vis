@@ -75,6 +75,14 @@ The editor supports simultaneous insertion, paste, motions, find, delete/change/
 yank, shift, join, text objects, registers and undo at multiple cursors. Remaining selection
 bindings and some combinations still need migration and differential coverage.
 
+Per-window native jump lists are implemented: `gs`, `g<`, `g>`, the
+`vis-jumplist-*` actions, JUMP motions (`G`, `gg`, `{`/`}`, `(`/`)`, `%`, `*`/`#`,
+`n`/`N`), visual-mode leaves and completed `:` commands record entries. Navigation
+restores the stored mode and geometry with the native orientation-preservation,
+first-primary and no-normalization rules, and separate windows keep independent
+rings across focus changes. Visual `o` flips every selection, as `vis-selection-flip`
+already did.
+
 The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
 Running shell process groups respond to external SIGINT/SIGTERM with bounded
@@ -166,6 +174,8 @@ make vis
 python3 rust/tests/differential.py
 python3 rust/tests/key_differential.py
 python3 rust/tests/key_differential.py --all
+cargo build --manifest-path rust/Cargo.toml --features lua
+python3 rust/tests/jumplist_native.py --rust-vis rust/target/debug/vis-rs
 cargo build --manifest-path rust/Cargo.toml
 python3 rust/tests/terminal_smoke.py
 python3 rust/tests/workspace_smoke.py
@@ -277,11 +287,12 @@ default build until those acceptance gates and platform/release work are done.
 
 The named-action catalogue now tracks all 178 entries in C's `KEY_ACTION_LIST`,
 with typed handlers and arguments rather than key-string aliases. Recognition
-and implementation are separate: the current inventory reports 87 implemented,
-60 conditional and 31 unsupported actions. Eighty bounded native-action cases
-match document bytes, every selection, orientation, primary selection and mode
-before and after Escape; this does not establish coverage of all 178 actions.
-Unsupported requested cases make the strict differential fail.
+and implementation are separate: the current inventory reports 90 implemented,
+60 conditional and 28 unsupported actions. A hundred and four bounded
+native-action cases match document bytes, every selection, orientation, primary
+selection and mode before and after Escape, with no unsupported requests; this
+does not establish coverage of all 178 actions. Unsupported requested cases make
+the strict differential fail.
 
 Linewise visual selections now store their full geometry in the editor rather
 than expanding ranges during rendering from the global mode. The shared view
@@ -294,3 +305,28 @@ instead of inheriting signed-overflow behavior.
 The dependency-free core remains dependency-free. Ordered drawing, Lua error
 windows, process-stream compatibility and cross-file structural continuations
 are under active integration; their completion requires fresh combined gates.
+
+## Jump list checkpoint (2026-10-26, macOS arm64)
+
+The per-window jump cache moved from a dormant module into the live host. Saves
+now come from the same events as C: JUMP motions after they complete, visual-mode
+leaves and visual operators through the shared window-selection path, `gs`/`g<`/
+`g>`, the three `vis-jumplist-*` native actions, and the `:`-command epilogue
+(which records the focused window after handlers such as `:split`). Navigation
+switches mode first so a visual leave re-enters the ring exactly where C does,
+then applies ranges with native orientation, anchoring and first-primary rules
+without normalizing duplicates. Window focus moves the active ring into and out
+of the window's saved view state.
+
+Visual `o` now flips every selection; it previously flipped only the primary,
+which also broke native orientation preservation on restore.
+
+Verification: `rust/tests/jumplist_native.py --rust-vis rust/target/debug/vis-rs`
+reproduces the C trace byte-for-byte across ring order, empty slots, EOF saves,
+full-ring wrap, split seeding, mode/geometry restoration, deletion/undo marks,
+duplicate normalization and multi-selection orientation. Five new host-level
+tests in `rust/tests/jumplist_actions.rs` run in ordinary `cargo test`. The
+all-feature/all-target suite, the standard-library-only suite, strict Clippy
+(default and no-default features) and formatting pass; the key sweeps remain
+108 pass/4 upstream exclusions (core) and 111 pass/1 exclusion (Lua), and the
+native-action differential reports 104 pass with no unsupported cases.

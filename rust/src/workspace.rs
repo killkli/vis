@@ -7,6 +7,7 @@
 
 use crate::editor::{BufferState, Editor, EditorAction, Key, Mode, PromptActionState};
 use crate::file::{Document, SaveMethod};
+use crate::jumplist::JumpList;
 use crate::selection::{Selection, SelectionId, SelectionMarks, SelectionSet};
 use crate::text::Text;
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,6 +82,9 @@ struct ViewState {
     tab_width: usize,
     expand_tab: bool,
     last_visual: Vec<SelectionMarks>,
+    /// Per-window jump cache while this window is unfocused. Boxed so the
+    /// operation enum's largest variant stays small.
+    jumplist: Box<JumpList<Mode>>,
 }
 
 impl ViewState {
@@ -99,10 +103,11 @@ impl ViewState {
             tab_width: 8,
             expand_tab: false,
             last_visual: Vec::new(),
+            jumplist: Box::new(JumpList::new()),
         }
     }
 
-    fn capture(editor: &Editor) -> Self {
+    fn capture(editor: &mut Editor) -> Self {
         Self {
             selections: editor
                 .view_state()
@@ -131,6 +136,7 @@ impl ViewState {
                     .ok()
                 })
                 .collect(),
+            jumplist: Box::new(editor.take_jumplist()),
         }
     }
 
@@ -368,7 +374,8 @@ impl Workspace {
     }
 
     fn capture(&mut self) {
-        self.windows[self.active].view = ViewState::capture(&self.editor);
+        let view = ViewState::capture(&mut self.editor);
+        self.windows[self.active].view = view;
     }
 
     fn focus(&mut self, index: usize) -> io::Result<()> {
@@ -418,7 +425,10 @@ impl Workspace {
             .collect();
         self.editor
             .named_mark_set('^', last_visual)
-            .map_err(|e| invalid(e.to_string()))
+            .map_err(|e| invalid(e.to_string()))?;
+        let jumplist = std::mem::take(&mut self.windows[self.active].view.jumplist);
+        self.editor.install_jumplist(*jumplist);
+        Ok(())
     }
 
     fn collect_closed_buffers(&mut self) {
@@ -537,7 +547,9 @@ impl Workspace {
 
     pub fn command(&mut self, command: &str) -> io::Result<Outcome> {
         let plan = self.begin_command(command)?;
-        self.drive_without_events(plan)
+        let outcome = self.drive_without_events(plan)?;
+        self.finish_command();
+        Ok(outcome)
     }
 
     pub fn initial_command(&mut self, command: &str) -> io::Result<Outcome> {

@@ -13,6 +13,7 @@ pub use actions::{
 };
 
 use crate::{
+    jumplist::JumpList,
     motion,
     regex::Regex,
     sam,
@@ -511,6 +512,9 @@ pub struct Editor {
     preferred_column: Option<usize>,
     selection_set: SelectionSet,
     motion_targets: Vec<Selection>,
+    /// Active window's native 32-slot jump cache; the workspace moves it in and
+    /// out of the focused window's saved view state.
+    jumplist: JumpList<Mode>,
     buffer_state: BufferState,
     selected_mark: char,
     session: sam::Session,
@@ -600,6 +604,7 @@ impl Editor {
             preferred_column: None,
             selection_set,
             motion_targets: Vec::new(),
+            jumplist: JumpList::new(),
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -1715,6 +1720,12 @@ impl Editor {
         if matches!(previous, Mode::Insert | Mode::Replace) {
             self.text.snapshot();
         }
+        if matches!(previous, Mode::Visual | Mode::VisualLine)
+            && !matches!(mode, Mode::Visual | Mode::VisualLine)
+            && self.operator.is_none()
+        {
+            self.window_selection_save()?;
+        }
         self.mode = mode;
         if matches!(mode, Mode::Insert | Mode::Replace) {
             self.enter_insert(mode == Mode::Replace, 1);
@@ -1740,6 +1751,133 @@ impl Editor {
         self.sync_primary_to_set()?;
         self.materialize_visual_lines()
     }
+    /// Native `window_selection_save`: store the last visual selection and add
+    /// the current selection to the jump list.
+    fn window_selection_save(&mut self) -> Result<(), EditorError> {
+        self.save_selection_mark('^')?;
+        self.jumplist_save();
+        Ok(())
+    }
+
+    /// Native `view_selections_get_all`: ordered selection geometry using the
+    /// cursor character, independent of whether visual mode is active.
+    fn jump_ranges(&self) -> Vec<Range<usize>> {
+        let data = self.text.to_vec();
+        self.selection_set
+            .selections()
+            .iter()
+            .map(|selection| {
+                selection.anchor.min(selection.cursor)
+                    ..motion::char_next(&data, selection.anchor.max(selection.cursor))
+            })
+            .collect()
+    }
+
+    /// Native `vis_jumplist(vis, 0)`.
+    pub fn jumplist_save(&mut self) {
+        let ranges = self.jump_ranges();
+        self.jumplist.save(&self.text, &ranges, self.mode);
+    }
+
+    pub fn take_jumplist(&mut self) -> JumpList<Mode> {
+        std::mem::take(&mut self.jumplist)
+    }
+
+    pub fn install_jumplist(&mut self, list: JumpList<Mode>) {
+        self.jumplist = list;
+    }
+
+    /// Native `vis_jumplist(vis, advance)`: save, or move once through the ring
+    /// and apply the stored mode and geometry. The mode switch runs before the
+    /// geometry is applied because leaving visual mode saves its own entry.
+    pub fn jumplist_navigate(&mut self, advance: isize) -> Result<EditorAction, EditorError> {
+        let current = self.jump_ranges();
+        let target = match advance.signum() {
+            0 => {
+                self.jumplist_save();
+                return Ok(EditorAction::Continue);
+            }
+            -1 => self.jumplist.older(&self.text, &current),
+            _ => self.jumplist.newer(&self.text, &current),
+        };
+        let Some(target) = target else {
+            return Ok(EditorAction::Continue);
+        };
+        if target.mode != self.mode && target.mode != Mode::Command {
+            self.switch_mode(target.mode)?;
+        }
+        self.apply_jump_ranges(&target.ranges)?;
+        Ok(EditorAction::Continue)
+    }
+
+    /// Native `view_selections_set_all`: reuse existing selections in order,
+    /// preserve each one's orientation, create extra selections forward, set
+    /// the primary to the first selection and never normalize geometry.
+    fn apply_jump_ranges(&mut self, ranges: &[Range<usize>]) -> Result<(), EditorError> {
+        let data = self.text.to_vec();
+        let ids = self.selection_ids().to_vec();
+        let existing = self.selection_set.selections().to_vec();
+        let primary_id = self.selection_set.primary_id();
+        let anchored = self.selection_anchored(primary_id).unwrap_or(false);
+        let mut identified = Vec::new();
+        if ranges.is_empty() {
+            // Native empty application keeps only the primary, collapsed, and
+            // leaves its cursor where it was.
+            let selection = self.selection_set.primary();
+            identified.push((
+                Some(primary_id),
+                Selection {
+                    anchor: selection.cursor,
+                    cursor: selection.cursor,
+                },
+            ));
+        } else {
+            for (index, range) in ranges.iter().enumerate() {
+                let start = range.start.min(data.len());
+                let mut end = range.end.min(data.len());
+                if start != end {
+                    end = motion::char_prev(&data, end);
+                }
+                let left_extending = existing
+                    .get(index)
+                    .is_some_and(|selection| selection.anchor > selection.cursor);
+                identified.push((
+                    ids.get(index).copied(),
+                    if left_extending {
+                        Selection {
+                            anchor: end,
+                            cursor: start,
+                        }
+                    } else {
+                        Selection {
+                            anchor: start,
+                            cursor: end,
+                        }
+                    },
+                ));
+            }
+        }
+        let mut used = Vec::new();
+        for (id, selection) in identified {
+            let id = match id {
+                Some(id) => id,
+                None => SelectionId::fresh().map_err(|e| EditorError(e.to_string()))?,
+            };
+            used.push((id, selection));
+        }
+        let primary = used[0].0;
+        self.selection_set = SelectionSet::from_identified(&data, used, primary)
+            .map_err(|e| EditorError(e.to_string()))?;
+        self.external_marks.clear();
+        let ids = self.selection_ids().to_vec();
+        self.anchored.clear();
+        for id in ids {
+            self.anchored.insert(id, anchored);
+        }
+        self.sync_set_to_primary();
+        Ok(())
+    }
+
     pub fn get_register_slots(&self, name: char) -> Vec<Vec<u8>> {
         self.register_slots
             .get(&name.to_ascii_lowercase())
@@ -2877,7 +3015,7 @@ impl Editor {
             return result;
         }
         if self.is_visual() && matches!(key, Key::Escape | Key::Ctrl('[')) {
-            self.save_selection_mark('^')?;
+            self.window_selection_save()?;
         }
         let register_prefix = matches!(self.pending, Pending::Register);
         let before = self.text.len();
@@ -3210,8 +3348,13 @@ impl Editor {
             };
             return Ok(EditorAction::Continue);
         }
+        let jump = Self::jump_motion_key(key) && !(key == Key::Char('%') && self.count.is_some());
         if let Some((target, inclusive, linewise)) = self.motion(key)? {
-            return self.finish_motion(target, inclusive, linewise);
+            let action = self.finish_motion(target, inclusive, linewise)?;
+            if jump {
+                self.jumplist_save();
+            }
+            return Ok(action);
         }
         if self.operator.is_some()
             && !matches!(
@@ -3493,6 +3636,7 @@ impl Editor {
                 for _ in 0..count {
                     self.search_motion(self.search_backwards ^ (key == Key::Char('N')))?;
                 }
+                self.jumplist_save();
             }
             Key::Char('*' | '#') => {
                 let data = self.text.to_vec();
@@ -3522,6 +3666,7 @@ impl Editor {
                 if let Some(range) = next {
                     self.cursor = range.start;
                 }
+                self.jumplist_save();
             }
             Key::Char('Z') => self.pending = Pending::Z,
             Key::Char('q') => self.pending = Pending::MacroRecord,
@@ -3916,6 +4061,16 @@ impl Editor {
     }
 
     fn g_key(&mut self, key: Key) -> Result<EditorAction, EditorError> {
+        match key {
+            Key::Char('s') => {
+                self.count = None;
+                self.jumplist_save();
+                return Ok(EditorAction::Continue);
+            }
+            Key::Char('<') => return self.jumplist_navigate(-1),
+            Key::Char('>') => return self.jumplist_navigate(1),
+            _ => {}
+        }
         if matches!(key, Key::Char('j' | 'k')) {
             if let Some((target, inclusive, linewise)) = self.motion(key)? {
                 return self.finish_motion(target, inclusive, linewise);
@@ -3969,10 +4124,23 @@ impl Editor {
                 }
             }
             let (target, inclusive, linewise) = result.expect("selection set has a primary");
-            return self.finish_motion(target, inclusive, linewise);
+            let action = self.finish_motion(target, inclusive, linewise)?;
+            if key == Key::Char('g') {
+                self.jumplist_save();
+            }
+            return Ok(action);
         }
         let (target, inclusive, linewise) = Self::g_target(&data, self.cursor, key, count)?;
-        self.finish_motion(target, inclusive, linewise)
+        let action = self.finish_motion(target, inclusive, linewise)?;
+        if key == Key::Char('g') {
+            self.jumplist_save();
+        }
+        Ok(action)
+    }
+
+    /// Motion keys whose native movement carries the JUMP flag.
+    fn jump_motion_key(key: Key) -> bool {
+        matches!(key, Key::Char('G' | '{' | '}' | '(' | ')' | '%'))
     }
 
     fn g_target(
@@ -4128,7 +4296,7 @@ impl Editor {
         linewise: bool,
     ) -> Result<EditorAction, EditorError> {
         if self.is_visual() {
-            self.save_selection_mark('^')?;
+            self.window_selection_save()?;
         }
         if self.selection_set.len() > 1 && self.is_visual() {
             return self.apply_many_operators(self.selection_ranges(), linewise);
@@ -4264,7 +4432,7 @@ impl Editor {
         }
         if matches!(operator, Operator::ShiftLeft | Operator::ShiftRight) {
             if self.is_visual() {
-                self.save_selection_mark('^')?;
+                self.window_selection_save()?;
             }
             self.shift_ranges(ranges, matches!(operator, Operator::ShiftRight))?;
             return Ok(EditorAction::Continue);
@@ -5369,7 +5537,7 @@ impl Editor {
         let visual = self.is_visual();
         let linewise = self.mode == Mode::VisualLine;
         if visual {
-            self.save_selection_mark('^')?;
+            self.window_selection_save()?;
         }
         let ranges = visual.then(|| self.selection_ranges());
         self.run_line_operator(ranges, |plan, range, cursor| {
