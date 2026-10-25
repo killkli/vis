@@ -12,3 +12,7 @@
 *.gcov
 *.html
 tags
+/dist/
+/.package-cache/
+__pycache__/
+/.serena/
