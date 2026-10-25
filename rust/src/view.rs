@@ -222,6 +222,21 @@ pub fn row_finish(data: &[u8], row: usize, columns: usize, tab_width: usize) -> 
     finish
 }
 
+/// Number of display columns occupied by a row, or `None` past the text.
+pub fn row_width(data: &[u8], row: usize, columns: usize, tab_width: usize) -> Option<usize> {
+    row_end_column(data, row, columns, tab_width).map(|end| end + 1)
+}
+
+/// Index of the final display row, which holds the EOF cursor cell.
+pub fn last_row(data: &[u8], columns: usize, tab_width: usize) -> usize {
+    let mut last = 0;
+    walk_cells(data, columns.max(1), tab_width, |cell| {
+        last = cell.row;
+        true
+    });
+    last
+}
+
 /// Display position of the last cursor cell in a row: C's screen-line end uses
 /// `line.width - 1`, i.e. the start column of the final cell.
 pub fn row_end_column(data: &[u8], row: usize, columns: usize, tab_width: usize) -> Option<usize> {

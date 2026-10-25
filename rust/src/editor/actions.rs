@@ -2028,7 +2028,7 @@ impl NativeAction {
                     | M::WindowLineMiddle
                     | M::WindowLineTop,
                 ),
-            ) => NativeSupport::Unsupported("requires measured viewport and display-line motions"),
+            ) => NativeSupport::Conditional("requires measured viewport geometry"),
             (H::Join, _) => NativeSupport::Conditional(
                 "joining while another operator is pending is not implemented",
             ),
@@ -2072,7 +2072,11 @@ impl NativeAction {
 }
 
 use super::{Editor, EditorAction, EditorError, Operator, Pending, Placement, Prompt, Register};
-use crate::{motion, selection::Selection};
+use crate::{
+    motion,
+    selection::Selection,
+    view::{last_row, position_at, row_start, row_width, screen_position},
+};
 
 impl Editor {
     pub fn invoke_native_action(
@@ -2717,6 +2721,19 @@ impl Editor {
             let (target, inclusive) = self.find_targets(find, count);
             return self.finish_motion(target, inclusive, false);
         }
+        if matches!(
+            movement,
+            M::ScreenLineBegin
+                | M::ScreenLineDown
+                | M::ScreenLineEnd
+                | M::ScreenLineMiddle
+                | M::ScreenLineUp
+                | M::WindowLineBottom
+                | M::WindowLineMiddle
+                | M::WindowLineTop
+        ) {
+            return self.native_view_motion(movement);
+        }
         let explicit = self.count.is_some() || self.operator_count > 1;
         let count = self.combined_count()?;
         let raw = explicit.then_some(count);
@@ -2808,6 +2825,97 @@ impl Editor {
             });
         }
         self.cursor = origin;
+        self.motion_targets = targets;
+        self.finish_motion(origin, properties.inclusive, properties.linewise)
+    }
+    /// Native screen-line (`gj`-style) and window-line (`H`/`M`/`L`) motions.
+    /// C keeps a per-view display line table; this port re-measures the wrapped
+    /// layout with the body geometry the UI last reported, so no frame-sized
+    /// state is retained. Window motions land on the start of a visible row;
+    /// screen motions keep the preferred display column.
+    fn native_view_motion(&mut self, movement: NativeMotion) -> Result<EditorAction, EditorError> {
+        use NativeMotion as M;
+        let viewport = self
+            .viewport
+            .ok_or_else(|| EditorError("viewport geometry is not measured yet".into()))?;
+        let explicit = self.count.is_some() || self.operator_count > 1;
+        let count = self.combined_count()?;
+        // Native window motions default their count to 0 (`L` measures from
+        // the bottom) unless the user supplied one.
+        let bottom_count = if explicit { count } else { 0 };
+        let data = self.text.to_vec();
+        let columns = viewport.width.max(1);
+        let tab_width = self.tab_width;
+        let last = last_row(&data, columns, tab_width);
+        let locate = |row: usize, column: usize| -> Option<usize> {
+            if row > last {
+                return None;
+            }
+            if row < last {
+                return position_at(&data, row, column, columns, tab_width);
+            }
+            // The final row may hold only the EOF cursor cell.
+            Some(position_at(&data, row, column, columns, tab_width).unwrap_or(data.len()))
+        };
+        let locate_row = |row: usize| -> Option<usize> {
+            let row = row.min(last);
+            row_start(&data, row, columns, tab_width)
+                .or_else(|| (row == last).then_some(data.len()))
+        };
+        let origin = self.cursor;
+        let properties = movement.properties();
+        let mut targets = Vec::new();
+        let mut preferred = self.preferred_column;
+        for selection in self.selections().to_vec() {
+            let cursor = selection.cursor.min(data.len());
+            let (row, column) = screen_position(&data, cursor, columns, tab_width);
+            let desired = preferred.unwrap_or(column);
+            let target = match movement {
+                M::ScreenLineBegin => locate(row, 0),
+                M::ScreenLineMiddle => row_width(&data, row, columns, tab_width)
+                    .and_then(|width| locate(row, width / 2)),
+                M::ScreenLineEnd => row_width(&data, row, columns, tab_width)
+                    .and_then(|width| locate(row, width.saturating_sub(1))),
+                M::ScreenLineUp => {
+                    preferred = Some(desired);
+                    locate(row.saturating_sub(count), desired)
+                }
+                M::ScreenLineDown => {
+                    preferred = Some(desired);
+                    locate(row.saturating_add(count).min(last), desired).filter(|_| row < last)
+                }
+                M::WindowLineTop => {
+                    locate_row(viewport.top.saturating_add(count.max(1) - 1).min(last))
+                }
+                M::WindowLineMiddle => locate_row(
+                    viewport
+                        .top
+                        .saturating_add(viewport.height / 2)
+                        .saturating_sub(1)
+                        .min(last),
+                ),
+                M::WindowLineBottom => {
+                    let offset = viewport.height.saturating_sub(bottom_count);
+                    locate_row(
+                        viewport
+                            .top
+                            .saturating_add(offset.saturating_sub(1))
+                            .min(last),
+                    )
+                }
+                _ => None,
+            }
+            .unwrap_or(cursor);
+            targets.push(Selection {
+                anchor: if self.is_visual() {
+                    selection.anchor
+                } else {
+                    target
+                },
+                cursor: target,
+            });
+        }
+        self.preferred_column = preferred;
         self.motion_targets = targets;
         self.finish_motion(origin, properties.inclusive, properties.linewise)
     }

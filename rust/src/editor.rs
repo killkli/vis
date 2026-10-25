@@ -3083,7 +3083,11 @@ impl Editor {
         if matches!(self.mode, Mode::Insert | Mode::Replace | Mode::Command)
             || !matches!(
                 key,
-                Key::Up | Key::Down | Key::Enter | Key::Char('j' | 'k' | '0'..='9')
+                Key::Up
+                    | Key::Down
+                    | Key::Enter
+                    | Key::Char('j' | 'k' | '0'..='9')
+                    | Key::Native(_)
             )
         {
             self.preferred_column = None;

@@ -91,8 +91,11 @@ searches through the native action names. Wrapped word searches can now match at
 position 0, so `n`/`*` from the document start behave like native search.
 `vis-suspend` and `<C-z>` now route through the host plan and suspend the
 interactive job with the terminal restored; configurations can shadow the
-binding with a normal mapping. Only viewport actions (redraw,
-page/slide/halfpage, screen-line and window-line motions) remain unsupported.
+binding with a normal mapping. Screen-line motions and the window-line
+`top`/`middle`/`bottom` motions use the soft-wrap cell model plus the body
+geometry the UI publishes for every drawn window, keeping the preferred
+display column across native actions. Only the viewport scroll actions
+(redraw, page, halfpage and slide) remain unsupported.
 
 The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
@@ -313,10 +316,10 @@ default build until those acceptance gates and platform/release work are done.
 The named-action catalogue now tracks all 178 entries in C's `KEY_ACTION_LIST`,
 with typed handlers and arguments rather than key-string aliases. Recognition
 and implementation are separate: the current inventory reports 96 implemented,
-64 conditional and 18 unsupported actions. Every unsupported entry is a
-viewport operation (redraw, page/slide/halfpage, screen-line and window-line
-motions); all other native names are routed, and the remaining conditional ones
-are mode restrictions rather than missing handlers.
+72 conditional and 10 unsupported actions. Every unsupported entry is a
+viewport scroll operation (redraw, page, halfpage or slide); all other native
+names are routed. Conditional entries are mode restrictions or the measured
+geometry screen-line/window-line motions need a drawn frame first.
 Bounded native-action cases match document bytes, every selection, orientation,
 primary selection and mode before and after Escape, with no unsupported
 requests; this does not establish coverage of all 178 actions. Unsupported
@@ -374,3 +377,32 @@ documented above as open differences, and viewport actions still need a host
 viewport engine. The PTY gate now waits for the real INSERT-status transition instead of
 a status word the native format never draws, and all ten scenarios pass with an
 isolated configuration, including suspend/resume through the new action path.
+
+## Viewport motion checkpoint (2026-10-26, macOS arm64)
+
+The renderer's soft-wrap cell walk moved into `view.rs`, and rendering,
+`screen_position` and the new row helpers now share it. The coordinate
+differential is unchanged: 20,234 equal values and the same 1,111 documented C
+quirks. Each drawn window publishes its body width, height, first wrapped row
+and visible range into the window state and focused editor, so motion code uses
+the layout the user is actually looking at.
+
+Screen-line begin/middle/end/up/down and window-line top/middle/bottom are
+implemented with native semantics: wrapped row starts and widths, wide-token
+column clamping, the preferred display column preserved across native actions,
+count handling (including `L`'s bottom-relative default of zero) and clamping to
+the final EOF row. Without a drawn frame the motions report that geometry is not
+measured instead of guessing. The native inventory is now 96 implemented, 72
+conditional and 10 unsupported; every unsupported name is a viewport scroll
+action (redraw, page, halfpage, slide).
+
+Verification: six host tests in `rust/tests/viewport_motions.rs` plus view-module
+unit tests cover row lookup, counts, clamping, wrapped columns, wide tokens and
+the missing-geometry error. A startup `vis:map` of `L` to the native action
+places the cursor on the measured last row in a real PTY. Interactive default
+bindings for `H`/`M`/`L` are still absent because the port's key table remains
+incomplete; the actions work through mappings, Lua and symbolic keys. Workspace
+and terminal PTY scenarios now pass 9/9 and 10/10 after replacing the harness's
+fixed post-Escape delay with idle detection. Cargo tests in both feature
+configurations, strict Clippy and formatting pass; key sweeps stay 108/4 and
+111/1, and the native-action differential stays at 118 pass.
