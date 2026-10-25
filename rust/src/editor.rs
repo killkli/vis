@@ -3478,7 +3478,8 @@ impl Editor {
                 self.align_indentation(key == Key::BackTab)?;
             }
             Key::Char('o') if self.is_visual() => {
-                std::mem::swap(&mut self.anchor, &mut self.cursor)
+                self.selection_set.flip_all();
+                self.sync_set_to_primary();
             }
             Key::Char('J') => return self.join(),
             Key::Char(':') => return self.show_prompt(Prompt::Command),
