@@ -1824,7 +1824,7 @@ impl Inner {
                             self.messages.borrow_mut().push(message.clone())
                         }
                         Outcome::Quit => *self.outcome.borrow_mut() = Outcome::Quit,
-                        Outcome::Continue => {}
+                        Outcome::Continue | Outcome::Suspend => {}
                     }
                     if matches!(*self.outcome.borrow(), Outcome::Quit) {
                         return Ok(Outcome::Quit);

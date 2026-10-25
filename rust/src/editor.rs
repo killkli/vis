@@ -3681,6 +3681,9 @@ impl Editor {
                 let count = self.take_count();
                 self.history_move(true, count)?;
             }
+            Key::Ctrl('z') if self.mode == Mode::Normal => {
+                return self.invoke_native_action(NativeAction::EditorSuspend);
+            }
             Key::Char('v' | 'V') => {
                 let mode = if key == Key::Char('v') {
                     Mode::Visual
@@ -8114,12 +8117,14 @@ mod tests {
         let mut e = editor(b"text");
         let before = e.text.to_vec();
         let action = NativeAction::EditorSuspend;
-        assert!(matches!(action.support(), NativeSupport::Unsupported(_)));
-        assert!(
-            e.handle_key(Key::Native(action))
-                .unwrap_err()
-                .0
-                .contains("unsupported native action vis-suspend")
+        assert_eq!(action.support(), NativeSupport::Implemented);
+        assert_eq!(
+            e.handle_key(Key::Native(action)).unwrap(),
+            EditorAction::HostCommand("suspend".into())
+        );
+        assert_eq!(
+            e.handle_key(Key::Ctrl('z')).unwrap(),
+            EditorAction::HostCommand("suspend".into())
         );
         assert_eq!(e.text.to_vec(), before);
     }

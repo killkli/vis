@@ -628,7 +628,7 @@ impl InteractiveHost {
                 *message = text;
                 false
             }
-            Ok(Outcome::Continue) => false,
+            Ok(Outcome::Continue | Outcome::Suspend) => false,
             Err(error) => {
                 *message = error.to_string();
                 false
@@ -645,7 +645,7 @@ impl InteractiveHost {
                     *message = text;
                     quit
                 }
-                Outcome::Continue => quit,
+                Outcome::Continue | Outcome::Suspend => quit,
             }
         };
         quit || self.exit_code().is_some()
@@ -933,7 +933,13 @@ fn run_interactive_session(
                 break InputEvent::Key(vis::editor::Key::Ctrl('c'));
             }
             if signals.suspend.swap(false, Ordering::Relaxed) {
-                break InputEvent::Key(vis::editor::Key::Ctrl('z'));
+                // An external SIGTSTP stopped the job; restore the terminal
+                // attributes and stop again so the shell sees a clean state,
+                // then redraw after continuing.
+                terminal.suspend()?;
+                signal_hook::low_level::raise(signal_hook::consts::signal::SIGSTOP)?;
+                terminal.resume()?;
+                break InputEvent::Timeout;
             }
             let event = match terminal.with(vis::terminal::Terminal::read_event) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -952,12 +958,6 @@ fn run_interactive_session(
                 break InputEvent::Timeout;
             }
         };
-        if matches!(event, InputEvent::Key(vis::editor::Key::Ctrl('z'))) {
-            terminal.suspend()?;
-            signal_hook::low_level::raise(signal_hook::consts::signal::SIGSTOP)?;
-            terminal.resume()?;
-            continue;
-        }
         let outcome = match event {
             InputEvent::Message(text) => Ok(Outcome::Message(text)),
             InputEvent::Key(key) => host.handle_key(key),
@@ -971,6 +971,12 @@ fn run_interactive_session(
             }
             InputEvent::Timeout => continue,
         };
+        if matches!(outcome, Ok(Outcome::Suspend)) {
+            terminal.suspend()?;
+            signal_hook::low_level::raise(signal_hook::consts::signal::SIGSTOP)?;
+            terminal.resume()?;
+            continue;
+        }
         message.clear();
         if host.report(outcome, &mut message) {
             break;

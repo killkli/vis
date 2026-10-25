@@ -89,8 +89,10 @@ The remaining non-viewport native actions are routed: cross-line
 `vis-selections-case-*` actions) with Unicode simple case mapping, and word
 searches through the native action names. Wrapped word searches can now match at
 position 0, so `n`/`*` from the document start behave like native search.
-Viewport actions (redraw, page/slide/halfpage, screen-line and window-line
-motions) and the named suspend continuation remain.
+`vis-suspend` and `<C-z>` now route through the host plan and suspend the
+interactive job with the terminal restored; configurations can shadow the
+binding with a normal mapping. Only viewport actions (redraw,
+page/slide/halfpage, screen-line and window-line motions) remain unsupported.
 
 The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
@@ -158,6 +160,10 @@ Known compatibility differences and limits:
   matched literally here. Character case mapping keeps a character unchanged
   when its Unicode mapping would change the byte length, where C leaves the
   selection to its length-preserving `mbstowcs`/`wcstombs` round trip.
+* The Lua `debug` and `ffi` libraries stay unavailable: mlua exposes them only
+  through its unsafe constructor and this crate forbids unsafe code.
+  Configuration that calls `debug.getinfo`, such as vis-lspc, fails while
+  loading; see [`LUA_PORTING.md`](LUA_PORTING.md).
 
 Run the interactive editor or a batch transformation:
 
@@ -305,11 +311,11 @@ default build until those acceptance gates and platform/release work are done.
 
 The named-action catalogue now tracks all 178 entries in C's `KEY_ACTION_LIST`,
 with typed handlers and arguments rather than key-string aliases. Recognition
-and implementation are separate: the current inventory reports 95 implemented,
-64 conditional and 19 unsupported actions. Every unsupported entry is a
+and implementation are separate: the current inventory reports 96 implemented,
+64 conditional and 18 unsupported actions. Every unsupported entry is a
 viewport operation (redraw, page/slide/halfpage, screen-line and window-line
-motions) except `vis-suspend`; all other native names are routed, and the
-remaining conditional ones are mode restrictions rather than missing handlers.
+motions); all other native names are routed, and the remaining conditional ones
+are mode restrictions rather than missing handlers.
 Bounded native-action cases match document bytes, every selection, orientation,
 primary selection and mode before and after Escape, with no unsupported
 requests; this does not establish coverage of all 178 actions. Unsupported
@@ -354,9 +360,9 @@ native-action differential reports 104 pass with no unsupported cases.
 
 ## Native action completion checkpoint (2026-10-26, macOS arm64)
 
-Cross-line character searches, selection case operators and native word-search
-actions are routed, leaving only viewport operations and the named suspend
-continuation unsupported (95 implemented, 64 conditional, 19 unsupported). The
+Cross-line character searches, selection case operators, native word-search
+actions and `vis-suspend` are routed, leaving only viewport operations
+unsupported (96 implemented, 64 conditional, 18 unsupported). The
 native-action differential reports 118 pass, zero failures and zero unsupported
 requests against C, covering the new find, case (ASCII, multibyte and invalid
 UTF-8) and wrapped-search cases. Word-search helpers now accept a match at the
@@ -364,4 +370,6 @@ search origin, matching native wrapped search; the full key sweeps remain 108/4
 and 111/1. All-feature and standard-library-only tests plus strict Clippy pass.
 Multi-cursor insertion primary state and literal word search stay documented
 above as open differences, and viewport actions still need a host viewport
-engine.
+engine. The PTY gate now waits for the real INSERT-status transition instead of
+a status word the native format never draws, and all ten scenarios pass with an
+isolated configuration, including suspend/resume through the new action path.

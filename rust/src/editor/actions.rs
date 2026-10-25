@@ -2013,9 +2013,6 @@ impl NativeAction {
         use NativeHandler as H;
         use NativeMotion as M;
         match (self.definition().handler, self.definition().argument) {
-            (H::Suspend, _) => {
-                NativeSupport::Unsupported("named terminal suspension has no host continuation yet")
-            }
             (H::Window | H::Wscroll | H::Wslide, _) | (H::Call, A::Call(NativeCall::Redraw)) => {
                 NativeSupport::Unsupported("requires the host viewport action engine")
             }
@@ -2369,6 +2366,7 @@ impl Editor {
                     self.sync_primary_to_set()?;
                 }
             }
+            (H::Suspend, _) => return Ok(EditorAction::HostCommand("suspend".into())),
             (H::Switchmode, A::Mode(mode)) => return self.native_switch_mode(mode),
             (H::NormalmodeEscape, _) => {
                 if self.count.take().is_none() {

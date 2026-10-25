@@ -218,6 +218,9 @@ pub enum Outcome {
     Continue,
     Message(String),
     Quit,
+    /// Native `vis-suspend` reached the plan; the interactive host restores the
+    /// terminal and stops the job. Hosts without a terminal ignore it.
+    Suspend,
 }
 
 pub struct Workspace {

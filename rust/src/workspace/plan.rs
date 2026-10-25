@@ -118,6 +118,7 @@ enum Operation {
     Native(EditorAction),
     Command(String),
     Help,
+    Suspend,
     Message(Vec<u8>),
     AppendMessage {
         window: usize,
@@ -633,6 +634,7 @@ impl Workspace {
                 };
                 match name {
                     "help" => operations.push(Operation::Help),
+                    "suspend" => operations.push(Operation::Suspend),
                     "split" | "vsplit" => {
                         if args.len() > 1 {
                             return Err(invalid("only one file allowed"));
@@ -1262,6 +1264,7 @@ impl Workspace {
                         )?;
                     }
                 }
+                Operation::Suspend => plan.outcome = Outcome::Suspend,
                 Operation::Help => {
                     let buffer = self.buffers.len();
                     self.buffers.push(Some(Buffer {
