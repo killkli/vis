@@ -1,0 +1,210 @@
+--- upstream/lulpeg.lua
++++ vis/lulpeg.lua
+@@ -90,6 +90,9 @@
+     elseif typ == "boolean" then
+         return v and truept or falsept
+     elseif typ == "number" then
++        -- Lua 5.5 lua_tointeger returns zero for a nonintegral number, which
++        -- is what LPeg 1.1's P constructor uses.
++        if v % 1 ~= 0 then v = 0 end
+         if v == 0 then
+             return truept
+         elseif v > 0 then
+@@ -181,7 +184,7 @@
+         pt = LL_P(pt)
+         local len = fixedlen(pt)
+         assert(len, "A 'behind' pattern takes a fixed length pattern as argument.")
+-        if len >= 260 then error("Subpattern too long in 'behind' pattern constructor.") end
++        if len > 255 then error("Subpattern too long in 'behind' pattern constructor.") end
+         return
+             constructors.both("behind", pt, len)
+     end
+@@ -254,6 +257,10 @@
+     return constructors.both(( n < 0 and "at most" or "at least" ), pt, n)
+ end
+ LL.__pow = LL_repeat
++function LL.__mod(pt, func)
++    assert(type(func) == "function", "function expected for accumulator capture")
++    return constructors.both("acc", LL_P(pt), func)
++end
+ for _, cap in pairs{"C", "Cs", "Ct"} do
+     LL[cap] = function(pt)
+         pt = LL_P(pt)
+@@ -266,8 +273,9 @@
+         constructors.aux("Cb", aux)
+ end
+ LL["Carg"] = function(aux)
+-    assert(type(aux)=="number", "Number expected as parameter to Carg capture.")
+-    assert( 0 < aux and aux <= 200, "Argument out of bounds in Carg capture.")
++    aux = tonumber(aux)
++    assert(aux and aux % 1 == 0, "Integer expected as parameter to Carg capture.")
++    assert(0 < aux and aux <= 32767, "Argument out of bounds in Carg capture.")
+     return
+         constructors.aux("Carg", aux)
+ end
+@@ -640,6 +648,23 @@
+ local evaluate, LL_ispattern =  LL.evaluate, LL.ispattern
+ local charset = Builder.charset
+ local compilers = {}
++-- Host-independent work/recursion bounds; no debug hook or native LPeg needed.
++local function budgeted(matcher, kind)
++    return function(sbj, si, caps, ci, state)
++        state.steps = (state.steps or 0) + 1
++        if state.steps > 10000000 then error("LPeg matching work limit exceeded") end
++        local reference = kind == "ref"
++        if reference then
++            state.depth = (state.depth or 0) + 1
++            if state.depth > (LL._maxstack or 400) then
++                error("LPeg grammar call stack limit exceeded")
++            end
++        end
++        local ok, position, capture = matcher(sbj, si, caps, ci, state)
++        if reference then state.depth = state.depth - 1 end
++        return ok, position, capture
++    end
++end
+ local
+ function compile(pt, ccache)
+     if not LL_ispattern(pt) then
+@@ -647,17 +672,17 @@
+     end
+     local typ = pt.pkind
+     if typ == "grammar" then
+-        ccache = {}
+-    elseif typ == "ref" or typ == "choice" or typ == "sequence" then
+-        if not ccache[pt] then
+-            ccache[pt] = compilers[typ](pt, ccache)
+-        end
+-        return ccache[pt]
+-    end
+-    if not pt.compiled then
+-        pt.compiled = compilers[pt.pkind](pt, ccache)
+-    end
+-    return pt.compiled
++        if not pt.compiled then
++            pt.compiled = budgeted(compilers[typ](pt, {}), typ)
++        end
++        return pt.compiled
++    end
++    -- References bind to a grammar scope. Captures and unary nodes can contain
++    -- references too, so never cache their compiled closures across grammars.
++    if not ccache[pt] then
++        ccache[pt] = budgeted(compilers[typ](pt, ccache), typ)
++    end
++    return ccache[pt]
+ end
+ LL.compile = compile
+ local
+@@ -732,7 +757,7 @@
+ end
+ for _, v in pairs{
+     "C", "Cf", "Cg", "Cs", "Ct", "Clb",
+-    "div_string", "div_table", "div_number", "div_function"
++    "div_string", "div_table", "div_number", "div_function", "acc"
+ } do
+     compilers[v] = load(([=[
+     local compile, expose, type, LL = ...
+@@ -832,7 +857,8 @@
+         end
+         if final_si == true then final_si = Cmt_si end
+         if type(final_si) == "number"
+-        and si <= final_si
++        and Cmt_si <= final_si
++        and final_si % 1 == 0
+         and final_si <= #sbj + 1
+         then
+             local kind, bounds, openclose, aux
+@@ -1082,6 +1108,7 @@
+                 local success
+                 last_si, last_ci = si, ci
+                 success, si, ci = matcher(sbj, si, caps, ci, state)
++                if success and si == last_si then error("loop body may accept empty string") end
+                 if not success then
+                     si, ci = last_si, last_ci
+                     break
+@@ -1101,6 +1128,7 @@
+                 local success
+                 last_si, last_ci = si, ci
+                 success, si, ci = matcher(sbj, si, caps, ci, state)
++                if success and si == last_si then error("loop body may accept empty string") end
+                 if not success then
+                     si, ci = last_si, last_ci
+                     break
+@@ -1122,6 +1150,7 @@
+                 local success
+                 last_si, last_ci = si, ci
+                 success, si, ci = matcher(sbj, si, caps, ci, state)
++                if success and si == last_si then error("loop body may accept empty string") end
+                 if not success then
+                     si, ci = last_si, last_ci
+                     break
+@@ -1182,7 +1211,7 @@
+     },
+     both = {
+         "behind", "at least", "at most", "Clb", "Cmt",
+-        "div_string", "div_number", "div_table", "div_function"
++        "div_string", "div_number", "div_table", "div_function", "acc"
+     },
+     none = "grammar", "Cc"
+ }
+@@ -1720,6 +1749,19 @@
+     end
+     return val_i
+ end
++-- LPeg 1.1 accumulator capture: replace the preceding value, adding none.
++function eval.acc(caps, sbj, vals, ci, vi)
++    if vi <= 1 then error("no previous value for accumulator capture") end
++    local func, params, count = caps.aux[ci], {}
++    if caps.openclose[ci] > 0 then
++        params[1] = s_sub(sbj, caps.bounds[ci], caps.openclose[ci] - 1)
++        count = 2
++    else
++        ci, count = insert(caps, sbj, params, ci + 1, 1)
++    end
++    vals[vi - 1] = func(vals[vi - 1], t_unpack(params, 1, count - 1))
++    return ci + 1, vi
++end
+ function eval.div_function (caps, sbj, vals, ci, vi)
+     local func = caps.aux[ci]
+     local params, divF_vi
+@@ -1806,7 +1848,7 @@
+         key = divT_vals[1]
+     end
+     ci = ci + 1
+-    if this_aux[key] then
++    if this_aux[key] ~= nil then
+         vals[vi] = this_aux[key]
+         return ci, vi + 1
+     else
+@@ -1845,7 +1887,7 @@
+ }
+ local unary_aux = setify{
+     "behind", "at least", "at most", "Clb", "Cmt",
+-    "div_string", "div_number", "div_table", "div_function"
++    "div_string", "div_number", "div_table", "div_function", "acc"
+ }
+ local unifiable = setify{"char", "set", "range"}
+ local hasCmt; hasCmt = setmetatable({}, {__mode = "k", __index = function(self, pt)
+@@ -1881,6 +1923,10 @@
+     Builder.set.union
+ local mergeable = setify{"char", "set"}
+ local type2cons = {
++    ["behind"] = "B",
++    ["lookahead"] = "L",
++    ["unm"] = "__unm",
++    ["acc"] = "__mod",
+     ["/zero"] = "__div",
+     ["div_number"] = "__div",
+     ["div_string"] = "__div",
+@@ -1915,7 +1961,10 @@
+     or     mergeable[kb] and ka == "any" and a.aux == 1 then
+         return ka == "any" and a or b
+     elseif ka == kb then
+-        if (unary[ka] or unary_aux[ka]) and ( a.aux == b.aux ) then
++        -- Choice does not distribute over repetition, negation or match-time
++        -- functions. Merging them changes PEG ordered-choice semantics.
++        if ka ~= "at least" and ka ~= "at most" and ka ~= "unm" and ka ~= "Cmt"
++        and (unary[ka] or unary_aux[ka]) and (a.aux == b.aux) then
+             return LL[type2cons[ka] or ka](a.pattern + b.pattern, a.aux)
+         elseif ( ka == kb ) and ka == "sequence" then
+             if a[1] == b[1]  and not hasCmt[a[1]] then

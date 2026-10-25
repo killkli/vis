@@ -126,3 +126,20 @@ There are plenty of ways to contribute, below are a few ideas:
 Checkout the [Developer Overview](https://github.com/martanne/vis/wiki/Developer-Overview)
 to get started and do not hesitate to ask question in the `#vis-editor`
 IRC channel on libera ([join via your browser](https://web.libera.chat/#vis-editor)).
+
+Rust port (in progress)
+-----------------------
+
+The staged Rust implementation lives in [`rust/`](rust/PORTING.md). It currently
+provides a standard-library-only editing core, a batch executable, and a Unix
+terminal editor using safe optional OS interfaces. Multiple files, split windows,
+shared-buffer cursors, mappings and macros are available. The optional `lua`
+feature adds genuine configuration/plugins and syntax styles through a safe Lua
+binding and pure-Lua LPeg. Real prompt windows and editable shared history are
+implemented. Full option, view, action and platform compatibility is still being ported; see the migration document for acceptance gates and limits.
+
+```sh
+cargo test --manifest-path rust/Cargo.toml
+cargo run --manifest-path rust/Cargo.toml -- path/to/file
+printf 'Emacs vi\n' | cargo run --manifest-path rust/Cargo.toml -- --command ',x/Emacs/ c/vis/'
+```

@@ -1,0 +1,46 @@
+[package]
+name = "vis-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "ISC"
+description = "Memory-safe Rust port of the vis structural text editor"
+publish = false
+default-run = "vis-rs"
+
+[lib]
+name = "vis"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vis-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "vis-digraph-rs"
+path = "src/bin/vis-digraph.rs"
+
+[[bin]]
+name = "vis-menu-rs"
+path = "src/bin/vis-menu.rs"
+
+[dependencies]
+mlua = { version = "0.11.6", default-features = false, features = ["lua55", "vendored"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30.1", default-features = false, features = ["signal"], optional = true }
+rustix = { version = "1.1.5", default-features = false, features = ["std", "termios", "event", "fs", "process"], optional = true }
+signal-hook = { version = "0.4.5", default-features = false, optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[features]
+default = ["terminal"]
+terminal = ["dep:rustix", "dep:signal-hook", "dep:nix"]
+lua = ["dep:mlua", "dep:rustix"]
+
