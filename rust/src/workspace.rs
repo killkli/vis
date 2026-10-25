@@ -85,6 +85,8 @@ struct ViewState {
     /// Per-window jump cache while this window is unfocused. Boxed so the
     /// operation enum's largest variant stays small.
     jumplist: Box<JumpList<Mode>>,
+    /// Last measured body geometry for viewport motions.
+    viewport: Option<crate::view::ViewportMetrics>,
 }
 
 impl ViewState {
@@ -104,6 +106,7 @@ impl ViewState {
             expand_tab: false,
             last_visual: Vec::new(),
             jumplist: Box::new(JumpList::new()),
+            viewport: None,
         }
     }
 
@@ -137,6 +140,7 @@ impl ViewState {
                 })
                 .collect(),
             jumplist: Box::new(editor.take_jumplist()),
+            viewport: None,
         }
     }
 
@@ -377,7 +381,11 @@ impl Workspace {
     }
 
     fn capture(&mut self) {
-        let view = ViewState::capture(&mut self.editor);
+        // Geometry belongs to the window, not the focus: keep the last
+        // measurement while its editor state moves out.
+        let viewport = self.windows[self.active].view.viewport;
+        let mut view = ViewState::capture(&mut self.editor);
+        view.viewport = viewport;
         self.windows[self.active].view = view;
     }
 
@@ -431,6 +439,8 @@ impl Workspace {
             .map_err(|e| invalid(e.to_string()))?;
         let jumplist = std::mem::take(&mut self.windows[self.active].view.jumplist);
         self.editor.install_jumplist(*jumplist);
+        self.editor
+            .set_viewport(self.windows[self.active].view.viewport);
         Ok(())
     }
 

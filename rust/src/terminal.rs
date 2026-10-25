@@ -62,8 +62,11 @@ pub struct ViewGeometry {
     pub x: usize,
     pub y: usize,
     pub width: usize,
+    /// Body rows, excluding the status line.
     pub height: usize,
     pub total_height: usize,
+    /// First displayed soft-wrapped row.
+    pub top: usize,
     pub bytes: Range<usize>,
     pub lines: Range<usize>,
 }
@@ -520,6 +523,7 @@ impl Terminal {
             Layout::Horizontal,
             message,
         )
+        .map(|_| ())
     }
 
     /// Draw every visible window using independent stable-id viewports, then
@@ -531,7 +535,7 @@ impl Terminal {
         active_id: usize,
         layout: Layout,
         message: &str,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<ViewGeometry>> {
         self.size = terminal_size(&self.tty)?;
         let frame = compose_views(
             &mut self.viewports,
@@ -542,7 +546,8 @@ impl Terminal {
             self.size,
         )?;
         self.tty.write_all(frame.as_bytes())?;
-        self.tty.flush()
+        self.tty.flush()?;
+        Ok(self.geometries(views))
     }
 
     pub fn measure_views(
@@ -570,7 +575,11 @@ impl Terminal {
             message,
             self.size,
         )?;
-        Ok(views
+        Ok(self.geometries(views))
+    }
+
+    fn geometries(&self, views: &[RenderView<'_>]) -> Vec<ViewGeometry> {
+        views
             .iter()
             .map(|view| {
                 self.viewports
@@ -589,12 +598,13 @@ impl Terminal {
                             width: 0,
                             height: 0,
                             total_height: 0,
+                            top: 0,
                             bytes: cursor..cursor,
                             lines: line..line,
                         }
                     })
             })
-            .collect())
+            .collect()
     }
 
     pub fn render_views_styled(
@@ -604,7 +614,7 @@ impl Terminal {
         layout: Layout,
         message: &str,
         decorations: &BTreeMap<usize, ViewDecorations>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<ViewGeometry>> {
         self.size = terminal_size(&self.tty)?;
         let frame = compose_views_decorated(
             &mut self.viewports,
@@ -616,7 +626,8 @@ impl Terminal {
             decorations,
         )?;
         self.tty.write_all(frame.as_bytes())?;
-        self.tty.flush()
+        self.tty.flush()?;
+        Ok(self.geometries(views))
     }
 
     /// Re-enter the editor screen after suspend or a fullscreen child. Keep
@@ -1204,6 +1215,7 @@ fn compose_views_decorated(
             width: region.width,
             height: body,
             total_height: region.height,
+            top: viewport.top,
             bytes: start..end.max(start),
             lines: first_line..last_line,
         });

@@ -9,6 +9,19 @@
 
 use crate::motion;
 
+/// Measured geometry of a focused window's body, as last laid out by the UI.
+/// The editor keeps it so viewport motions use the real screen size and the
+/// scroll position the user is looking at.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ViewportMetrics {
+    /// Body columns (the full window width).
+    pub width: usize,
+    /// Body rows, excluding the status line.
+    pub height: usize,
+    /// First displayed soft-wrapped row.
+    pub top: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CellKind {
     Source,

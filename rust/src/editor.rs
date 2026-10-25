@@ -558,6 +558,8 @@ pub struct Editor {
     /// Active window's native 32-slot jump cache; the workspace moves it in and
     /// out of the focused window's saved view state.
     jumplist: JumpList<Mode>,
+    /// Body geometry the UI last measured for the focused window.
+    viewport: Option<crate::view::ViewportMetrics>,
     buffer_state: BufferState,
     selected_mark: char,
     session: sam::Session,
@@ -648,6 +650,7 @@ impl Editor {
             selection_set,
             motion_targets: Vec::new(),
             jumplist: JumpList::new(),
+            viewport: None,
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -1828,6 +1831,15 @@ impl Editor {
 
     pub fn install_jumplist(&mut self, list: JumpList<Mode>) {
         self.jumplist = list;
+    }
+
+    /// Install the focused window's measured body geometry.
+    pub fn set_viewport(&mut self, viewport: Option<crate::view::ViewportMetrics>) {
+        self.viewport = viewport;
+    }
+
+    pub fn viewport(&self) -> Option<crate::view::ViewportMetrics> {
+        self.viewport
     }
 
     /// Native `vis_jumplist(vis, advance)`: save, or move once through the ring

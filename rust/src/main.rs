@@ -699,9 +699,11 @@ impl InteractiveHost {
             return Ok(true);
         };
         let views = render_views(&frames);
-        for geometry in terminal
-            .with(|terminal| terminal.measure_views_with_message(&views, active, layout, message))?
-        {
+        let geometry = terminal.with(|terminal| {
+            terminal.measure_views_with_message(&views, active, layout, message)
+        })?;
+        self.publish_geometry(&geometry);
+        for geometry in geometry {
             self.runtime.set_viewport(
                 geometry.id,
                 geometry.width,
@@ -731,15 +733,32 @@ impl InteractiveHost {
         };
         let views = render_views(&frames);
         #[cfg(feature = "lua")]
-        {
+        let geometry = {
             let decorations = self.runtime.render_decorations();
             terminal.with(|terminal| {
                 terminal.render_views_styled(&views, active, layout, message, &decorations)
-            })?;
-        }
+            })?
+        };
         #[cfg(not(feature = "lua"))]
-        terminal.with(|terminal| terminal.render_views(&views, active, layout, message))?;
+        let geometry =
+            terminal.with(|terminal| terminal.render_views(&views, active, layout, message))?;
+        self.publish_geometry(&geometry);
         Ok(false)
+    }
+
+    /// Hand the body geometry of every drawn window to its viewport motions.
+    fn publish_geometry(&self, geometry: &[vis::terminal::ViewGeometry]) {
+        let mut workspace = self.workspace.borrow_mut();
+        for item in geometry {
+            workspace.set_window_viewport(
+                item.id,
+                vis::view::ViewportMetrics {
+                    width: item.width,
+                    height: item.height,
+                    top: item.top,
+                },
+            );
+        }
     }
 }
 
