@@ -161,6 +161,10 @@ Known compatibility differences and limits:
   Conflict checks are best effort, not filesystem locks.
 * Width and combining tables approximate the original `wcwidth` behavior. The
   motion differential corpus verifies ASCII/control inputs, not full Unicode.
+* A cursor that jumps outside the measured body follows to the bottom row
+  here, while native `view_cursors_to` centers it by half a page. The page,
+  halfpage and slide actions build on that anchoring policy and stay
+  unsupported until it is ported; `zt`/`zz`/`zb` do not depend on it.
 * After a wrapped multi-cursor word search, C lists the selections in a
   different order from the Rust set. Both expose the same selections and the
   same primary cursor, but ordered comparison (as in the native-action
@@ -404,7 +408,8 @@ The redraw actions (`zt`, `zz`, `zb`, `vis-redraw`) set a one-shot requested
 top row on the editor; the workspace exposes it on the next frame and clears it
 after rendering, so later cursor motions auto-follow again. The native inventory
 is now 100 implemented, 72 conditional and 6 unsupported; every unsupported name
-is a page, halfpage or slide scroll action.
+is a page, halfpage or slide scroll action, which first needs the native
+half-page centering policy for out-of-view jumps.
 
 Window motions clamp to the last row that holds source cells rather than the
 virtual EOF cursor row, matching native `L` in short files.
