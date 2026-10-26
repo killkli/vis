@@ -5821,8 +5821,17 @@ impl Editor {
 
     fn put(&mut self, after: bool) -> Result<EditorAction, EditorError> {
         let count = self.take_count();
+        let visual = self.is_visual();
+        let register_name = self.selected_register;
+        if visual {
+            self.window_selection_save()?;
+        }
         if self.selection_set.len() > 1 {
-            return self.put_multiple(after, count);
+            let action = self.put_multiple(after, count)?;
+            if visual {
+                self.record_visual_put_repeat(after, count, register_name);
+            }
+            return Ok(action);
         }
         let register = self
             .register(self.operation_register_name())
@@ -5831,9 +5840,6 @@ impl Editor {
         // The native put operator deletes the visual selection before it
         // inserts, so an empty register still removes the selected text.
         let selection = self.selection().filter(|range| !range.is_empty());
-        if selection.is_none() && register.bytes.is_empty() && !register.linewise {
-            return Ok(EditorAction::Continue);
-        }
         if register
             .bytes
             .len()
@@ -5894,7 +5900,26 @@ impl Editor {
         self.mode = Mode::Normal;
         self.text.snapshot();
         self.recording_change = true;
+        if visual {
+            self.record_visual_put_repeat(after, count, register_name);
+        }
         Ok(EditorAction::Continue)
+    }
+
+    fn record_visual_put_repeat(&mut self, after: bool, count: usize, register: Option<char>) {
+        if self.internal_scope || self.replaying || !self.repeatable {
+            return;
+        }
+        let mut keys = Vec::new();
+        if let Some(register) = register {
+            keys.extend([Key::Char('"'), Key::Char(register)]);
+        }
+        if count > 1 {
+            keys.extend(count.to_string().chars().map(Key::Char));
+        }
+        keys.push(Key::Char(if after { 'p' } else { 'P' }));
+        self.last_change = keys;
+        self.recording_change = false;
     }
 
     fn put_multiple(&mut self, after: bool, count: usize) -> Result<EditorAction, EditorError> {
