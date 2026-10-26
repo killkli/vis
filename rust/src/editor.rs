@@ -4732,8 +4732,13 @@ impl Editor {
                 '<' | '>' => motion::delimited_object(data, pos, b'<', outer),
                 '"' | '\'' | '`' => motion::delimited_object(data, pos, c as u8, outer),
                 _ => return Err(EditorError("unknown text object".into())),
-            }
-            .ok_or_else(|| EditorError("text object not found".into()))?;
+            };
+            // Native vis_do breaks out of the count loop when the object is
+            // missing, leaving the range accumulated so far (an empty range
+            // at the cursor for the first iteration) for the operator.
+            let Some(object) = object else {
+                break;
+            };
             if object.start > object.end || object.end > data.len() {
                 return Err(EditorError("invalid text object range".into()));
             }
