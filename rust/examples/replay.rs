@@ -256,21 +256,21 @@ fn state(editor: &Editor) -> Result<String, ReplayError> {
         editor.primary_index(),
         editor.selections().len()
     );
-    let visual = matches!(editor.mode, Mode::Visual | Mode::VisualLine);
     let line_ranges = if editor.mode == Mode::VisualLine {
         editor.selection_ranges()
     } else {
         Vec::new()
     };
-    for (index, &selection) in editor.selections().iter().enumerate() {
-        let range = if editor.mode == Mode::VisualLine {
+    for (index, (id, selection)) in editor.view_identified().into_iter().enumerate() {
+        let anchored = editor.selection_anchored(id).unwrap_or(false);
+        let range = if editor.mode == Mode::VisualLine && anchored {
             line_ranges[index].clone()
         } else {
             selection
                 .range(&data)
                 .map_err(|e| ReplayError::ordinary(e.to_string()))?
         };
-        let endpoint = if !visual {
+        let endpoint = if !anchored {
             "point"
         } else if selection.cursor == range.start {
             "start"
@@ -282,7 +282,7 @@ fn state(editor: &Editor) -> Result<String, ReplayError> {
             selection.cursor,
             range.start,
             range.end,
-            usize::from(visual),
+            usize::from(anchored),
             endpoint
         ));
     }
