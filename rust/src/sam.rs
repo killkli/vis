@@ -115,6 +115,10 @@ pub struct Execution {
     pub changes: Vec<Change>,
     /// Reserved for commands which explicitly produce output. `p` selects.
     pub output: Vec<u8>,
+    /// A command-level diagnostic. The native editor stops the command group
+    /// but still keeps earlier transcript effects and reports the script as
+    /// accepted.
+    pub diagnostic: Option<String>,
 }
 
 /// A write request resolved without mutating text or editor selections.
@@ -339,6 +343,20 @@ impl Session {
         self.execute_in_mode(text, script, &[dot], false)
     }
 
+    /// Execute with an explicit policy for command-level evaluation failures.
+    /// Native `vis:command` stops the group, keeps prior transcript effects and
+    /// reports the failure; strict callers instead receive the error atomically.
+    pub fn execute_many_reporting(
+        &mut self,
+        text: &mut Text,
+        script: &str,
+        dots: &[Range<usize>],
+        accept_diagnostics: bool,
+    ) -> Result<Execution, SamError> {
+        let visual = dots.iter().any(|dot| !dot.is_empty());
+        self.execute_in_mode_reporting(text, script, dots, visual, accept_diagnostics)
+    }
+
     /// Evaluate one parsed command tree over all original-coordinate selections
     /// before applying a single transcript. Guard counts span the inputs; nested
     /// x/y loops initialize their own count domains for each input.
@@ -547,6 +565,17 @@ impl Session {
         dots: &[Range<usize>],
         visual: bool,
     ) -> Result<Execution, SamError> {
+        self.execute_in_mode_reporting(text, script, dots, visual, true)
+    }
+
+    fn execute_in_mode_reporting(
+        &mut self,
+        text: &mut Text,
+        script: &str,
+        dots: &[Range<usize>],
+        visual: bool,
+        accept_diagnostics: bool,
+    ) -> Result<Execution, SamError> {
         let mut parser = Parser {
             script: script.as_bytes(),
             pos: 0,
@@ -568,6 +597,7 @@ impl Session {
             &positions,
             self.shell_context(),
             visual,
+            accept_diagnostics,
         )
     }
 }
@@ -3507,6 +3537,7 @@ fn execute_commands(
     marks: &BTreeMap<char, Vec<Option<usize>>>,
     shell: ShellContext<'_>,
     visual: bool,
+    accept_diagnostics: bool,
 ) -> Result<Execution, SamError> {
     if dots.is_empty()
         || dots.len() > MAX_STEPS
@@ -3538,7 +3569,8 @@ fn execute_commands(
         target_selection: None,
         shell,
     };
-    for (index, dot) in dots.iter().enumerate() {
+    let mut diagnostic = None;
+    'commands: for (index, dot) in dots.iter().enumerate() {
         evaluator.input = index;
         let mut dot = dot.clone();
         for command in commands {
@@ -3563,7 +3595,14 @@ fn execute_commands(
                     _ => dot.start..crate::motion::char_next(&data, dot.start),
                 };
             }
-            evaluator.command(command, &mut dot, false)?;
+            match evaluator.command(command, &mut dot, false) {
+                Ok(()) => {}
+                Err(error) if accept_diagnostics && error.is_evaluation() => {
+                    diagnostic = Some(error.message);
+                    break 'commands;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -3640,6 +3679,7 @@ fn execute_commands(
         selection_detached,
         changes,
         output: Vec::new(),
+        diagnostic,
     })
 }
 
@@ -3671,17 +3711,19 @@ mod tests {
     }
 
     #[test]
-    fn conflict_and_late_parse_errors_are_atomic() {
-        for script in [
-            ",{c/first/ c/second/}",
-            "i/first/ {",
-            "i/first/ ! false",
-            "i/first/ #999d",
-        ] {
+    fn conflicts_and_parse_failures_are_atomic_but_command_failures_commit() {
+        for script in [",{c/first/ c/second/}", "i/first/ {"] {
             let mut text = Text::from_bytes(b"original");
             assert!(execute(&mut text, script, 0..8).is_err(), "{script}");
             assert_eq!(text.to_vec(), b"original");
             assert_eq!(text.undo(), None);
+        }
+        for script in ["i/first/ ! false", "i/first/ #999d"] {
+            let mut text = Text::from_bytes(b"original");
+            let execution = execute(&mut text, script, 0..8).unwrap();
+            assert!(execution.diagnostic.is_some(), "{script}");
+            assert_eq!(text.to_vec(), b"firstoriginal", "{script}");
+            assert!(text.undo().is_some(), "{script}");
         }
     }
 
@@ -4262,16 +4304,13 @@ mod tests {
     }
 
     #[test]
-    fn error_phases_preserve_strict_batch_rollback() {
+    fn parse_and_transcript_errors_are_atomic_but_evaluation_diagnostics_commit() {
         for (script, phase) in [
             ("0i/queued/\n{", SamErrorPhase::Parse),
             ("0i/queued/\nx/[/ p", SamErrorPhase::Parse),
             ("not-a-command", SamErrorPhase::Parse),
             ("{c/first/ c/second/}", SamErrorPhase::Transcript),
             ("0i67108865/x/", SamErrorPhase::Transcript),
-            ("0i/queued/\n'ap", SamErrorPhase::Evaluation),
-            ("0i/queued/\n#999p", SamErrorPhase::Evaluation),
-            ("0i/queued/\n/not-present/p", SamErrorPhase::Evaluation),
         ] {
             let mut session = Session::new();
             let mut text = Text::from_bytes(b"original");
@@ -4279,9 +4318,20 @@ mod tests {
                 .execute_many(&mut text, script, &[0..8])
                 .unwrap_err();
             assert_eq!(error.phase(), phase, "{script}: {error}");
-            assert_eq!(error.is_evaluation(), phase == SamErrorPhase::Evaluation);
             assert_eq!(text.to_vec(), b"original", "{script}");
             assert_eq!(text.undo(), None, "{script}");
+        }
+        for script in [
+            "0i/queued/\n'ap",
+            "0i/queued/\n#999p",
+            "0i/queued/\n/not-present/p",
+        ] {
+            let mut session = Session::new();
+            let mut text = Text::from_bytes(b"original");
+            let execution = session.execute_many(&mut text, script, &[0..8]).unwrap();
+            assert!(execution.diagnostic.is_some(), "{script}");
+            assert_eq!(text.to_vec(), b"queuedoriginal", "{script}");
+            assert!(text.undo().is_some(), "{script}");
         }
     }
 
@@ -4327,19 +4377,17 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn error_phases_keep_shell_and_read_failures_strict_but_handled() {
+    fn shell_and_read_failures_are_accepted_diagnostics_which_keep_prior_edits() {
         for script in [
             "0i/queued/\n1| false\n",
             "0i/queued/\nr /dev/null/vis-missing\n",
         ] {
             let mut session = Session::new();
             let mut text = Text::from_bytes(b"original");
-            let error = session
-                .execute_many(&mut text, script, &[0..8])
-                .unwrap_err();
-            assert!(error.is_evaluation(), "{script}: {error}");
-            assert_eq!(text.to_vec(), b"original");
-            assert_eq!(text.undo(), None);
+            let execution = session.execute_many(&mut text, script, &[0..8]).unwrap();
+            assert!(execution.diagnostic.is_some(), "{script}");
+            assert_eq!(text.to_vec(), b"queuedoriginal");
+            assert!(text.undo().is_some());
         }
     }
 
@@ -4727,13 +4775,14 @@ mod tests {
         assert_eq!(session.previous_regex(), Some("two"));
         assert!(session.execute(&mut text, ",x/[/ d", 0..7).is_err());
         assert_eq!(session.previous_regex(), Some("two"));
-        assert!(session.execute(&mut text, ",x/X/c/Z/ #999d", 0..7).is_err());
+        let execution = session.execute(&mut text, ",x/X/c/Z/ #999d", 0..7).unwrap();
+        assert!(execution.diagnostic.is_some());
         assert_eq!(session.previous_regex(), Some("X"));
-        assert_eq!(text.to_vec(), b"X two X");
+        assert_eq!(text.to_vec(), b"Z two Z");
         session.set_previous_regex("two").unwrap();
         assert!(session.set_previous_regex("[").is_err());
         session.execute(&mut text, ",x// c/Y/", 0..7).unwrap();
-        assert_eq!(text.to_vec(), b"X Y X");
+        assert_eq!(text.to_vec(), b"Z Y Z");
     }
 
     #[test]
@@ -4750,9 +4799,10 @@ mod tests {
         assert_eq!(text.to_vec(), b"original");
         session.execute(&mut text, "<\n", 0..8).unwrap();
         assert_eq!(text.to_vec(), b"first");
-        session
+        let execution = session
             .execute(&mut text, "| printf failed; exit 2\n", 0..5)
-            .unwrap_err();
+            .unwrap();
+        assert!(execution.diagnostic.is_some());
         assert_eq!(session.previous_shell(), Some("printf failed; exit 2"));
         assert_eq!(text.to_vec(), b"first");
     }
@@ -4773,7 +4823,9 @@ mod tests {
             .unwrap();
         session.execute(&mut first, "'a,'bc/X/", 0..6).unwrap();
         assert_eq!(first.to_vec(), b"aXef");
-        assert!(session.execute(&mut first, "'ai/!/", 0..4).is_err());
+        let execution = session.execute(&mut first, "'ai/!/", 0..4).unwrap();
+        assert!(execution.diagnostic.is_some());
+        assert_eq!(first.to_vec(), b"aXef");
         first.undo().unwrap();
         session.execute(&mut first, "'ai/A/", 0..6).unwrap();
         session.execute(&mut second, "'ai/B/", 0..4).unwrap();
@@ -4783,7 +4835,8 @@ mod tests {
         assert!(session.marks(&first, 'a').is_none());
         assert_eq!(session.marks(&second, 'a').unwrap().len(), 1);
         assert!(session.clear_marks(&second, 'a').is_some());
-        assert!(session.execute(&mut second, "'ap", 0..5).is_err());
+        let execution = session.execute(&mut second, "'ap", 0..5).unwrap();
+        assert!(execution.diagnostic.is_some());
 
         let mut text = Text::from_bytes(b"abc def");
         session
@@ -5016,15 +5069,16 @@ mod tests {
             };
             let mut text = Text::from_bytes(b"original");
             let started = Instant::now();
-            let error = session.execute(&mut text, script, 0..8).unwrap_err();
+            let execution = session.execute(&mut text, script, 0..8).unwrap();
             assert!(started.elapsed() < Duration::from_secs(3));
+            let error = execution.diagnostic.expect("observer failure diagnostic");
             if failure == "exit" {
-                assert!(error.message.contains("23"), "{error}");
+                assert!(error.contains("23"), "{error}");
             } else {
-                assert!(error.message.contains(failure), "{error}");
+                assert!(error.contains(failure), "{error}");
             }
-            assert_eq!(text.to_vec(), b"original");
-            assert_eq!(text.undo(), None);
+            assert_eq!(text.to_vec(), b"queuedoriginal");
+            assert!(text.undo().is_some());
             let events = groups.lock().unwrap();
             assert_eq!(events.len(), if failure == "restore" { 3 } else { 2 });
             assert!(events[0].is_some());
@@ -5199,17 +5253,18 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn shell_failure_does_not_commit_prior_edits() {
+    fn shell_failure_reports_a_diagnostic_and_commits_prior_edits() {
         let mut text = Text::from_bytes(b"original");
-        let error = execute(
+        let execution = execute(
             &mut text,
             "0i/first/\n,| printf partial; printf reason >&2; exit 3\n",
             0..8,
         )
-        .unwrap_err();
-        assert!(error.message.contains("reason"));
-        assert_eq!(text.to_vec(), b"original");
-        assert_eq!(text.undo(), None);
+        .unwrap();
+        let diagnostic = execution.diagnostic.expect("shell diagnostic");
+        assert!(diagnostic.contains("reason"), "{diagnostic}");
+        assert_eq!(text.to_vec(), b"firstoriginal");
+        assert!(text.undo().is_some());
     }
 
     #[test]
@@ -5248,8 +5303,10 @@ mod tests {
         let script = format!("{}i/x/{}", "{".repeat(70), "}".repeat(70));
         assert!(execute(&mut Text::new(), &script, 0..0).is_err());
         assert!(execute(&mut Text::new(), "i999999999/x/", 0..0).is_err());
-        for script in ["s/a/b/", "w /tmp/file", "g0/x/d", "'ad"] {
+        for script in ["s/a/b/", "w /tmp/file", "g0/x/d"] {
             assert!(execute(&mut Text::new(), script, 0..0).is_err(), "{script}");
         }
+        let execution = execute(&mut Text::new(), "'ad", 0..0).unwrap();
+        assert!(execution.diagnostic.is_some());
     }
 }

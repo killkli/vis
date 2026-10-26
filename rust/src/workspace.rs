@@ -636,7 +636,10 @@ impl Workspace {
             }
             self.handle_key(Key::Enter)
         } else {
-            self.command(command.strip_prefix(':').unwrap_or(command))
+            let plan = self.prepare_command(command.strip_prefix(':').unwrap_or(command))?;
+            let outcome = self.drive_without_events(plan)?;
+            self.finish_command();
+            Ok(outcome)
         }
     }
 

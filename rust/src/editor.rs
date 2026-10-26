@@ -7093,15 +7093,15 @@ impl Editor {
             ranges
         };
         let original_ids = self.selection_ids().to_vec();
-        let result = self.session.execute_many(&mut self.text, command, &ranges);
+        let result =
+            self.session
+                .execute_many_reporting(&mut self.text, command, &ranges, compatible);
         self.sync_sam_registers();
         let execution = match result {
             Ok(execution) => execution,
-            Err(error) if compatible && error.is_evaluation() => {
-                return Ok(EditorAction::Message(error.to_string()));
-            }
             Err(error) => return Err(EditorError(error.to_string())),
         };
+        let diagnostic = execution.diagnostic.clone();
         if !execution.selections.is_empty() {
             self.mode = if execution.selections.iter().all(Range::is_empty) {
                 Mode::Normal
@@ -7196,7 +7196,10 @@ impl Editor {
         }
         self.recording_change = false;
         self.command_keys.clear();
-        Ok(EditorAction::Continue)
+        match diagnostic {
+            Some(message) => Ok(EditorAction::Message(message)),
+            None => Ok(EditorAction::Continue),
+        }
     }
 
     fn repeat(&mut self, count: Option<usize>) -> Result<EditorAction, EditorError> {

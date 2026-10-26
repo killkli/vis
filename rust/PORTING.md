@@ -219,10 +219,13 @@ the original platform-dependent `BUFSIZ`; long candidate lines stay intact.
 
 Known compatibility differences and limits:
 
-* Shell/read failure aborts queued document edits and returns an error. Current C
-  vis hides these failures and commits prior edits in two sam fixtures:
-  `commands/pipe-out.cmd` and `errors/read.cmd`. External shell effects themselves
-  cannot be rolled back. The differential gate reports both differences.
+* Evaluation-time command failures (shell/read errors, invalid marks or
+  addresses) stop the explicit group but are accepted like `vis:command`:
+  earlier transcript effects commit and the failure becomes a message. Parse,
+  validation and transcript-conflict errors remain atomic. The strict Rust
+  `Workspace::command` path still returns the evaluation error without queuing
+  its transcript; startup commands and prompt entry use native acceptance.
+  External shell effects themselves cannot be rolled back.
 * Regex matching uses C-locale named classes, rejects unsupported collation and
   backreferences, and has explicit pattern/program/work/capture limits. Long
   near-miss searches may reach the work limit. Empty regex is accepted by the
@@ -713,3 +716,25 @@ in both feature configurations, strict Clippy and formatting. The matrices are
 bounded; the native parser's redispatch of invalid key prefixes (for example
 `d[}`), its unsupported visual repeat and bare-dot operator-pending states, and
 non-native text objects are not reproduced.
+
+## Structural acceptance checkpoint (2026-10-26, macOS arm64)
+
+Structural evaluation now separates parse, validation and transcript conflicts
+from command-level failures, matching `vis:command`. A failing shell command,
+file read, invalid mark or invalid address stops the explicit group, keeps every
+transcript effect queued before it and returns accepted status with a message;
+an execution carries that diagnostic so the editor can display it after applying
+the changes. Conflicts and parse errors remain atomic and return an error.
+
+The strict Rust host API keeps its previous contract: `Workspace::command`,
+`Editor::execute_command` and the strict Sam mode reject evaluation errors
+without queuing their transcript. Interactive prompts and startup `--command`
+values use the native accepted path, while file-loop and host continuations
+already classified evaluation diagnostics as messages.
+
+Verification: all 30 structural differential fixtures now match C vis, including
+`commands/pipe-out.cmd`, `commands/pipe-in.cmd` and `errors/read.cmd`; the
+previous three fixture failures are gone. The library tests cover diagnostic
+commit plus undo, strict rejection, register and stable-mark survival, shell
+observer cleanup, and conflict/parse rollback. Full default-feature tests,
+strict Clippy and formatting pass.
