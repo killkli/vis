@@ -6168,7 +6168,6 @@ impl Editor {
             _ => return Err(EditorError("replacement character expected".into())),
         };
         let data = self.text.to_vec();
-        let explicit_count = self.count.is_some();
         let count = self.take_count();
         if self.selection_set.len() > 1 {
             let visual = self.is_visual();
@@ -6816,11 +6815,7 @@ impl Editor {
     fn window_option_command(arg: &str) -> Option<String> {
         let mut words = arg.split_whitespace();
         let first = words.next()?;
-        let (raw, inline) = match first.split_once('=') {
-            Some((name, value)) => (name, Some(value.to_string())),
-            None => (first, None),
-        };
-        let name = raw.trim_end_matches('!');
+        let name = first.trim_end_matches('!');
         if !matches!(
             name,
             "statusbar"
@@ -6847,15 +6842,7 @@ impl Editor {
         ) {
             return None;
         }
-        let mut command = format!("set {name}");
-        if let Some(value) = inline {
-            command.push(' ');
-            command.push_str(&value);
-        } else if let Some(value) = words.next() {
-            command.push(' ');
-            command.push_str(value);
-        }
-        Some(command)
+        Some(format!("set {arg}"))
     }
 
     fn execute_command_with_policy(
@@ -6957,90 +6944,84 @@ impl Editor {
                     return Ok(EditorAction::HostCommand(command));
                 }
                 let result = (|| -> Result<(), EditorError> {
-                    // Native `set option [value]`: the option name comes first
-                    // and an option that takes a value reads the next word.
-                    let mut tokens = arg.split_whitespace().peekable();
-                    while let Some(option) = tokens.next() {
-                        let (name, inline) = match option.split_once('=') {
-                            Some((name, value)) => (name, Some(value.to_string())),
-                            None => (option, None),
-                        };
-                        let boolean = |value: Option<&str>| -> Result<bool, EditorError> {
-                            match value {
-                                None => Ok(true),
-                                Some("1" | "true" | "yes" | "on") => Ok(true),
-                                Some("0" | "false" | "no" | "off") => Ok(false),
-                                Some(_) => Err(EditorError("expected boolean option value".into())),
+                    // Native `set option [value]`: exactly one option name and
+                    // at most one value; there is no `no` prefix.
+                    let tokens: Vec<&str> = arg.split_whitespace().collect();
+                    if tokens.is_empty() || tokens.len() > 2 {
+                        return Err(EditorError("Expecting: set option [value]".into()));
+                    }
+                    let raw = tokens[0];
+                    let toggle = raw.ends_with('!');
+                    let name = raw.trim_end_matches('!');
+                    let value = tokens.get(1).map(|value| (*value).to_string());
+                    let boolean = |current: bool| -> Result<bool, EditorError> {
+                        if toggle {
+                            if value.is_some() {
+                                return Err(EditorError(
+                                    "Can not specify option value when toggling".into(),
+                                ));
                             }
-                        };
-                        match name {
-                            "expandtab" | "et" => self.expand_tab = boolean(inline.as_deref())?,
-                            "noexpandtab" | "noet" => self.expand_tab = false,
-                            "ignorecase" | "ic" => self.ignorecase = boolean(inline.as_deref())?,
-                            "noignorecase" | "noic" => self.ignorecase = false,
-                            "change256colors" => self.change256colors = boolean(inline.as_deref())?,
-                            "loadmethod" => {
-                                let method = match inline {
-                                    Some(value) => value,
-                                    None => tokens
-                                        .next()
-                                        .ok_or_else(|| {
-                                            EditorError("Expecting string option value".into())
-                                        })?
-                                        .to_string(),
-                                };
-                                self.set_loadmethod(Some(method));
-                            }
-                            "autoindent" | "ai" => self.auto_indent = boolean(inline.as_deref())?,
-                            "noautoindent" | "noai" => self.auto_indent = false,
-                            "tabwidth" | "tw" => {
-                                let value = match inline {
-                                    Some(value) => value,
-                                    None => tokens
-                                        .next()
-                                        .ok_or_else(|| {
-                                            EditorError("tab width must be 1..8".into())
-                                        })?
-                                        .to_string(),
-                                };
-                                self.tab_width = value
-                                    .parse::<usize>()
-                                    .ok()
-                                    .filter(|n| (1..=8).contains(n))
-                                    .ok_or_else(|| EditorError("tab width must be 1..8".into()))?;
-                            }
-                            "shell" => {
-                                let value = match inline {
-                                    Some(value) => value,
-                                    None => tokens
-                                        .next()
-                                        .ok_or_else(|| {
-                                            EditorError("Expecting string option value".into())
-                                        })?
-                                        .to_string(),
-                                };
-                                self.set_shell(Some(value));
-                            }
-                            "escdelay" => {
-                                let value = match inline {
-                                    Some(value) => value,
-                                    None => tokens
-                                        .next()
-                                        .ok_or_else(|| {
-                                            EditorError("escape delay must be a number".into())
-                                        })?
-                                        .to_string(),
-                                };
-                                let milliseconds = value.parse::<u64>().map_err(|_| {
-                                    EditorError("escape delay must be a number".into())
-                                })?;
-                                self.set_escape_delay(Some(std::time::Duration::from_millis(
-                                    milliseconds,
-                                )));
-                            }
-                            _ => {
-                                return Err(EditorError(format!("Unknown option: `{name}`")));
-                            }
+                            return Ok(!current);
+                        }
+                        match value.as_deref() {
+                            None | Some("1" | "true" | "yes" | "on") => Ok(true),
+                            Some("0" | "false" | "no" | "off") => Ok(false),
+                            Some(_) => Err(EditorError("Expecting boolean option value".into())),
+                        }
+                    };
+                    let boolean_option = matches!(
+                        name,
+                        "expandtab"
+                            | "et"
+                            | "ignorecase"
+                            | "ic"
+                            | "change256colors"
+                            | "autoindent"
+                            | "ai"
+                    );
+                    if toggle && !boolean_option {
+                        return Err(EditorError("Only boolean options can be toggled".into()));
+                    }
+                    match name {
+                        "expandtab" | "et" => self.expand_tab = boolean(self.expand_tab)?,
+                        "ignorecase" | "ic" => self.ignorecase = boolean(self.ignorecase)?,
+                        "change256colors" => {
+                            self.change256colors = boolean(self.change256colors)?;
+                        }
+                        "autoindent" | "ai" => self.auto_indent = boolean(self.auto_indent)?,
+                        "tabwidth" | "tw" => {
+                            let value =
+                                value.ok_or_else(|| EditorError("Expecting number".into()))?;
+                            self.tab_width = value
+                                .parse::<usize>()
+                                .ok()
+                                .filter(|n| (1..=8).contains(n))
+                                .ok_or_else(|| EditorError("tab width must be 1..8".into()))?;
+                        }
+                        "shell" => {
+                            let value = value.ok_or_else(|| {
+                                EditorError("Expecting string option value".into())
+                            })?;
+                            self.set_shell(Some(value));
+                        }
+                        "escdelay" => {
+                            let value =
+                                value.ok_or_else(|| EditorError("Expecting number".into()))?;
+                            let milliseconds = value
+                                .parse::<u64>()
+                                .map_err(|_| EditorError("escape delay must be a number".into()))?;
+                            self.set_escape_delay(Some(std::time::Duration::from_millis(
+                                milliseconds,
+                            )));
+                        }
+                        "loadmethod" => {
+                            let value = value.ok_or_else(|| {
+                                EditorError("Expecting string option value".into())
+                            })?;
+                            self.set_loadmethod(Some(value));
+                        }
+                        _ => {
+                            return Err(EditorError(format!("Unknown option: `{name}`")));
                         }
                     }
                     Ok(())

@@ -642,20 +642,14 @@ impl Workspace {
                         if args.len() > 2 {
                             return Err(invalid("expected set option [value]"));
                         }
-                        let (raw, equal_value) = option
-                            .split_once('=')
-                            .map_or((option.as_str(), None), |(name, value)| (name, Some(value)));
-                        let toggle = raw.ends_with('!');
-                        let raw = raw.trim_end_matches('!');
-                        let (name, negate) = raw
-                            .strip_prefix("no")
-                            .map_or((raw, false), |name| (name, true));
-                        let value = equal_value.or_else(|| args.get(1).map(String::as_str));
+                        let toggle = option.ends_with('!');
+                        let raw = option.trim_end_matches('!');
+                        let value = args.get(1).map(String::as_str);
                         let window = self
                             .windows
                             .get(self.active)
                             .map_or(usize::MAX, |window| window.id);
-                        self.apply_set_option(name, value, toggle, negate, window)?;
+                        self.apply_set_option(raw, value, toggle, window)?;
                     }
                     "help" => operations.push(Operation::Help),
                     "suspend" => operations.push(Operation::Suspend),

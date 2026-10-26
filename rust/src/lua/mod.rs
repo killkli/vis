@@ -2256,21 +2256,12 @@ impl Inner {
         if words.is_empty() {
             return Ok(None);
         }
+        if words.len() > 2 {
+            return Ok(Some(false));
+        }
         let raw = &words[0];
-        let (raw, value_from_eq) = raw
-            .split_once('=')
-            .map(|(a, b)| (a, Some(b)))
-            .unwrap_or((raw.as_str(), None));
         let toggle = raw.ends_with('!');
-        let raw = raw.trim_end_matches('!');
-        let (name, negated) =
-            if self.options.borrow().contains_key(raw) || builtin_option_kind(raw).is_some() {
-                (raw, false)
-            } else if let Some(n) = raw.strip_prefix("no") {
-                (n, true)
-            } else {
-                (raw, false)
-            };
+        let name = raw.trim_end_matches('!');
         let kind = self
             .options
             .borrow()
@@ -2278,9 +2269,12 @@ impl Inner {
             .map(|option| option.kind)
             .or_else(|| builtin_option_kind(name));
         let Some(kind) = kind else { return Ok(None) };
-        let text = value_from_eq.or_else(|| words.get(1).map(String::as_str));
+        let text = words.get(1).map(String::as_str);
+        if toggle && (text.is_some() || kind != OptionKind::Bool) {
+            return Ok(Some(false));
+        }
         let value = match kind {
-            OptionKind::Bool => Value::Boolean(if negated || (toggle && text.is_none()) {
+            OptionKind::Bool => Value::Boolean(if toggle {
                 false
             } else {
                 match text {

@@ -77,18 +77,10 @@ impl Workspace {
                 if request.args.is_empty() || request.args.len() > 2 {
                     return Err(invalid("expected set option [value]"));
                 }
-                let (raw, equal_value) = request.args[0]
-                    .split_once('=')
-                    .map_or((request.args[0].as_str(), None), |(name, value)| {
-                        (name, Some(value))
-                    });
-                let toggle = raw.ends_with('!');
-                let raw = raw.trim_end_matches('!');
-                let (name, negate) = raw
-                    .strip_prefix("no")
-                    .map_or((raw, false), |name| (name, true));
-                let value = equal_value.or_else(|| request.args.get(1).map(String::as_str));
-                self.apply_set_option(name, value, toggle, negate, request.window)?;
+                let toggle = request.args[0].ends_with('!');
+                let raw = request.args[0].trim_end_matches('!');
+                let value = request.args.get(1).map(String::as_str);
+                self.apply_set_option(raw, value, toggle, request.window)?;
                 Ok(EditorAction::Continue)
             }
             H::Substitute => Err(invalid(
@@ -125,9 +117,32 @@ impl Workspace {
         name: &str,
         value: Option<&str>,
         toggle: bool,
-        negate: bool,
         window: usize,
     ) -> io::Result<()> {
+        if toggle
+            && !matches!(
+                name,
+                "expandtab"
+                    | "et"
+                    | "autoindent"
+                    | "ai"
+                    | "statusbar"
+                    | "sb"
+                    | "showeof"
+                    | "oneline"
+                    | "numbers"
+                    | "nu"
+                    | "relativenumbers"
+                    | "rnu"
+                    | "cursorline"
+                    | "cul"
+                    | "showspaces"
+                    | "showtabs"
+                    | "shownewlines"
+            )
+        {
+            return Err(invalid("Only boolean options can be toggled"));
+        }
         let (mut width, mut expand, mut auto) = self
             .window_options(window)
             .ok_or_else(|| invalid("closed window"))?;
@@ -137,9 +152,6 @@ impl Workspace {
                     return Err(invalid("toggle does not accept a value"));
                 }
                 return Ok(!current);
-            }
-            if negate {
-                return Ok(false);
             }
             match value {
                 None | Some("1" | "true" | "yes" | "on") => Ok(true),

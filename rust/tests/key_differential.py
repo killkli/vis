@@ -74,6 +74,11 @@ BUILTINS = [
     ("counted-line-shift", b"one two three\nfour five\nsix seven\n", "2>gg"),
     ("failed-find-operator", b"one two three\nfour five\nsix seven\n", ">fz"),
     ("failed-find-change", b"one two three\nfour five\nsix seven\n", "cfzX<Escape>"),
+    ("set-no-prefix", b"abc\n", ":set et<Enter>:set noet<Enter>i<Tab>X<Escape>"),
+    ("set-equals-syntax", b"abc\n", ":set et=1<Enter>i<Tab>X<Escape>"),
+    ("set-multiple-options", b"abc\n", ":set et tw=4<Enter>i<Tab>X<Escape>"),
+    ("set-value", b"abc\n", ":set tabwidth 4<Enter>:set et<Enter>i<Tab>X<Escape>"),
+    ("set-toggle", b"abc\n", ":set et<Enter>:set et!<Enter>i<Tab>X<Escape>"),
     ("percent-scans-forward", b"alpha.beta, gamma_delta (x) [y] {z}\n", "d%"),
 ]
 

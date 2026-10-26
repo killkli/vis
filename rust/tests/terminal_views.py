@@ -127,7 +127,7 @@ def run(binary):
             raw(session, b"2l")
             settle(session)
             assert cursor(session) == (2, 1), cursor(session)
-            raw(session, b":set tabwidth=4\r")
+            raw(session, b":set tabwidth 4\r")
             settle(session)
             assert cursor(session) == (1, 5), cursor(session)
             raw(session, b":q\r")

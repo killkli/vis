@@ -793,20 +793,14 @@ impl Workspace {
                 if args.len() > 2 {
                     return Err(invalid("expected set option [value]"));
                 }
-                let (raw, equal_value) = option
-                    .split_once('=')
-                    .map_or((option.as_str(), None), |(name, value)| (name, Some(value)));
-                let toggle = raw.ends_with('!');
-                let raw = raw.trim_end_matches('!');
-                let (name, negate) = raw
-                    .strip_prefix("no")
-                    .map_or((raw, false), |name| (name, true));
-                let value = equal_value.or_else(|| args.get(1).map(String::as_str));
+                let toggle = option.ends_with('!');
+                let raw = option.trim_end_matches('!');
+                let value = args.get(1).map(String::as_str);
                 let window = self
                     .windows
                     .get(self.active)
                     .map_or(usize::MAX, |window| window.id);
-                self.apply_set_option(name, value, toggle, negate, window)?;
+                self.apply_set_option(raw, value, toggle, window)?;
                 Ok(Outcome::Continue)
             }
             "wincmd" => match args.first().map(String::as_str) {
@@ -1162,15 +1156,19 @@ mod tests {
     #[test]
     fn split_defaults_window_options_and_focus_preserves_global_autoindent() {
         let mut workspace = Workspace::new(&[], None, false).unwrap();
-        workspace
-            .command("set tabwidth=4 expandtab autoindent")
-            .unwrap();
+        workspace.command("set tabwidth 4").unwrap();
+        workspace.command("set expandtab").unwrap();
+        workspace.command("set autoindent").unwrap();
         workspace.command("split").unwrap();
         assert_eq!(workspace.editor.tab_width, 8);
         assert!(!workspace.editor.expand_tab && workspace.editor.auto_indent);
+        workspace.command("set tabwidth 2").unwrap();
         workspace
-            .command("set tabwidth=2 noexpandtab noautoindent")
-            .unwrap();
+            .command("set tabwidth 3 expandtab")
+            .expect_err("native :set takes one option");
+        assert_eq!(workspace.editor.tab_width, 2);
+        assert!(!workspace.editor.expand_tab);
+        workspace.command("set autoindent!").unwrap();
         workspace.command("wincmd p").unwrap();
         assert_eq!(workspace.editor.tab_width, 4);
         assert!(workspace.editor.expand_tab && !workspace.editor.auto_indent);
