@@ -6780,7 +6780,11 @@ impl Editor {
                 return match crate::history::execute(&mut self.text, name == "earlier", arg) {
                     Ok(position) => {
                         self.cursor = position.unwrap_or(self.cursor).min(self.text.len());
-                        Ok(EditorAction::Continue)
+                        let state = self.text.state();
+                        Ok(EditorAction::Message(format!(
+                            "State from {}",
+                            crate::time::local_hm(state)
+                        )))
                     }
                     Err(error) if compatible && !error.is_parse() => {
                         Ok(EditorAction::Message(error.to_string()))
@@ -7431,6 +7435,34 @@ mod tests {
     }
     fn escape(editor: &mut Editor) {
         editor.handle_key(Key::Escape).unwrap();
+    }
+
+    #[test]
+    fn earlier_and_later_report_the_selected_state_time() {
+        let mut e = editor(b"old\n");
+        e.text.insert(4, b"new\n").unwrap();
+        e.text.snapshot();
+        assert_eq!(e.text.to_vec(), b"old\nnew\n");
+
+        let action = e.execute_command("earlier").unwrap();
+        assert_eq!(e.text.to_vec(), b"old\n");
+        assert_eq!(
+            action,
+            EditorAction::Message(format!(
+                "State from {}",
+                crate::time::local_hm(e.text.state())
+            ))
+        );
+
+        let action = e.execute_command("later").unwrap();
+        assert_eq!(e.text.to_vec(), b"old\nnew\n");
+        assert_eq!(
+            action,
+            EditorAction::Message(format!(
+                "State from {}",
+                crate::time::local_hm(e.text.state())
+            ))
+        );
     }
     #[test]
     fn insert_unicode_binary_and_grouped_undo() {

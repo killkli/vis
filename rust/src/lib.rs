@@ -15,6 +15,7 @@ pub mod sam;
 pub mod selection;
 pub mod style;
 pub mod text;
+mod time;
 pub mod view;
 mod width;
 pub mod workspace;
