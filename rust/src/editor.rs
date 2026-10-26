@@ -5762,7 +5762,10 @@ impl Editor {
             .register(self.operation_register_name())
             .cloned()
             .unwrap_or_default();
-        if register.bytes.is_empty() && !register.linewise {
+        // The native put operator deletes the visual selection before it
+        // inserts, so an empty register still removes the selected text.
+        let selection = self.selection().filter(|range| !range.is_empty());
+        if selection.is_none() && register.bytes.is_empty() && !register.linewise {
             return Ok(EditorAction::Continue);
         }
         if register
@@ -5774,13 +5777,22 @@ impl Editor {
             return Err(EditorError("put size limit exceeded".into()));
         }
         let data = self.text.to_vec();
-        let selection = self.selection();
         let source_cursor = selection.as_ref().map_or(self.cursor, |range| range.start);
         let mut pos = self.cursor;
         self.text.snapshot();
-        if let Some(range) = selection {
+        if let Some(range) = selection.clone() {
+            // op_put: a linewise register over a non-linewise selection
+            // continues on the following line, like the native PUT_AFTER
+            // adjustment guarded by text_range_is_linewise.
+            let sel_linewise = !range.is_empty()
+                && motion::line_begin(&data, range.start) == range.start
+                && motion::line_begin(&data, range.end) == range.end;
             pos = range.start;
             self.text.delete(range)?;
+            if register.linewise && !sel_linewise {
+                let current = self.text.to_vec();
+                pos = motion::line_next(&current, pos);
+            }
         } else if register.linewise {
             pos = if after {
                 motion::line_next(&data, pos)
