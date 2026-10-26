@@ -5337,11 +5337,8 @@ impl Editor {
         if matches!(self.pending, Pending::InsertRegister) {
             self.pending = Pending::None;
             if let Key::Char(c) = key {
-                let bytes = self
-                    .register(c)
-                    .map(|r| r.bytes.clone())
-                    .unwrap_or_default();
-                self.insert_bytes(&bytes)?;
+                let register = self.register(c).cloned().unwrap_or_default();
+                self.insert_register(&register)?;
                 return Ok(EditorAction::Continue);
             }
             return Err(EditorError("register expected".into()));
@@ -5668,6 +5665,33 @@ impl Editor {
         self.cursor += bytes.len();
         self.recording_change |= !bytes.is_empty();
         Ok(())
+    }
+
+    /// Native insert-mode register put (`VIS_OP_PUT_BEFORE_END`): a linewise
+    /// register is inserted at the line begin and always ends in a newline.
+    fn insert_register(&mut self, register: &Register) -> Result<(), EditorError> {
+        let count = self.insert_count.max(1);
+        let mut bytes = Vec::with_capacity(register.bytes.len().saturating_mul(count));
+        for _ in 0..count {
+            bytes.extend_from_slice(&register.bytes);
+        }
+        if !register.linewise {
+            return self.insert_bytes(&bytes);
+        }
+        if bytes.last() != Some(&b'\n') {
+            bytes.push(b'\n');
+        }
+        let data = self.text.to_vec();
+        let edits = self
+            .selection_set
+            .selections()
+            .iter()
+            .map(|selection| {
+                let pos = motion::line_begin(&data, selection.cursor.min(data.len()));
+                (pos..pos, bytes.clone())
+            })
+            .collect();
+        self.commit_multiple(edits, Placement::End)
     }
 
     fn insert_literal_bytes(&mut self, bytes: &[u8]) -> Result<(), EditorError> {

@@ -66,6 +66,9 @@ BUILTINS = [
     ("punctuation-word-search", b'<div class="x">\n  <p>hello</p>\n</div>\n', "*dn"),
     ("punctuation-word-search-repeat", b'<div class="x">\n  <p>hello</p>\n</div>\n', "*n"),
     ("insert-window-slide", b"one two three\nfour five\n", "i<C-x><C-e>X<Escape>"),
+    ("insert-linewise-register", b"one two three\nfour five\n", "yyA<C-r>0<Escape>"),
+    ("insert-counted-register", b"one two three\nfour five\n", "yy2i<C-r>0<Escape>"),
+    ("insert-charwise-register", b"one two three\nfour five\n", "yiw3A<C-r>0<Escape>"),
     ("percent-scans-forward", b"alpha.beta, gamma_delta (x) [y] {z}\n", "d%"),
 ]
 
