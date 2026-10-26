@@ -27,6 +27,12 @@ pub struct ViewportMetrics {
 pub enum CellKind {
     Source,
     Space,
+    /// The first cell of an expanded tab, which carries the tab symbol.
+    Tab,
+    /// The remaining cells of an expanded tab.
+    TabFill,
+    /// The cell of a line ending.
+    Newline,
     Replacement,
     Eof,
 }
@@ -215,6 +221,9 @@ fn place_line(
                     let (width, len) = token_metrics(data, *pos, out_column);
                     let kind = if width > columns {
                         CellKind::Replacement
+                    } else if data[*pos] == b' ' {
+                        // Native `view_expand_space` draws the space symbol.
+                        CellKind::Space
                     } else {
                         CellKind::Source
                     };
@@ -239,10 +248,14 @@ fn place_line(
                 Token::Tab { pos } => {
                     let count = tab_width - out_column % tab_width;
                     (0..count)
-                        .map(|_| LineCell {
+                        .map(|index| LineCell {
                             pos: *pos,
                             len: 1,
-                            kind: CellKind::Space,
+                            kind: if index == 0 {
+                                CellKind::Tab
+                            } else {
+                                CellKind::TabFill
+                            },
                             width: 1,
                             column: 0,
                             brk: false,
@@ -252,7 +265,7 @@ fn place_line(
                 Token::Newline { pos } => vec![LineCell {
                     pos: *pos,
                     len: 1,
-                    kind: CellKind::Space,
+                    kind: CellKind::Newline,
                     width: 1,
                     column: 0,
                     brk: false,

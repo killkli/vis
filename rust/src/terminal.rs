@@ -899,7 +899,7 @@ fn wrapped_rows(
     selections: &[Range<usize>],
 ) -> Vec<RenderedLine> {
     wrapped_rows_decorated(
-        data, columns, tab_width, visible, selections, None, true, "",
+        data, columns, tab_width, visible, selections, None, true, "", false, false, false,
     )
 }
 
@@ -913,6 +913,9 @@ fn wrapped_rows_decorated(
     decorations: Option<&ViewDecorations>,
     show_eof: bool,
     breakat: &str,
+    show_spaces: bool,
+    show_tabs: bool,
+    show_newlines: bool,
 ) -> Vec<RenderedLine> {
     let mut lines: Vec<_> = (visible.clone())
         .map(|_| RenderedLine {
@@ -974,7 +977,11 @@ fn wrapped_rows_decorated(
                 .text
                 .push_str(&display_token(data, cell.pos, cell.column).0),
             CellKind::Replacement => line.text.push('?'),
-            CellKind::Space | CellKind::Eof => line.text.push(' '),
+            CellKind::Space => line.text.push(if show_spaces { '·' } else { ' ' }),
+            CellKind::Tab => line.text.push(if show_tabs { '›' } else { ' ' }),
+            CellKind::TabFill => line.text.push(' '),
+            CellKind::Newline => line.text.push(if show_newlines { '↵' } else { ' ' }),
+            CellKind::Eof => line.text.push(' '),
         }
         line.width += cell.width;
         true
@@ -1467,11 +1474,14 @@ impl Viewport {
                 selections,
                 region,
                 tab_width,
-                display,
+                display.clone(),
                 styles,
                 overlay,
                 &numbers,
                 wrap_columns,
+                display.showspaces,
+                display.showtabs,
+                display.shownewlines,
             );
             return PanelFrame {
                 text,
@@ -1496,6 +1506,9 @@ impl Viewport {
             decorations,
             display.showeof,
             &display.breakat,
+            display.showspaces,
+            display.showtabs,
+            display.shownewlines,
         );
         for (row, rendered) in visible.into_iter().enumerate() {
             frame.push_str(&format!("\x1b[{};{}H", region.y + row + 1, region.x + 1));
@@ -1678,6 +1691,9 @@ fn ordered_panel(
     overlay: &OverlayContext,
     numbers: &LineNumbers,
     wrap_width: usize,
+    show_spaces: bool,
+    show_tabs: bool,
+    show_newlines: bool,
 ) -> String {
     let width = region.width;
     let height = region.height;
@@ -1744,7 +1760,29 @@ fn ordered_panel(
         let token = match cell.kind {
             CellKind::Source => display_token(data, cell.pos, cell.column).0,
             CellKind::Replacement => "?".into(),
-            CellKind::Space | CellKind::Eof => " ".into(),
+            CellKind::Space => {
+                if show_spaces {
+                    "·".into()
+                } else {
+                    " ".into()
+                }
+            }
+            CellKind::Tab => {
+                if show_tabs {
+                    "›".into()
+                } else {
+                    " ".into()
+                }
+            }
+            CellKind::TabFill => " ".into(),
+            CellKind::Newline => {
+                if show_newlines {
+                    "↵".into()
+                } else {
+                    " ".into()
+                }
+            }
+            CellKind::Eof => " ".into(),
         };
         let index = row * text_width + cell.column;
         body[index].text = token;
@@ -2531,7 +2569,19 @@ mod tests {
             cells: BTreeMap::from([((3, 0), 22)]),
             ..ViewDecorations::default()
         };
-        let lines = wrapped_rows_decorated(b"ab", 5, 8, 0..1, &[], Some(&styles), true, "");
+        let lines = wrapped_rows_decorated(
+            b"ab",
+            5,
+            8,
+            0..1,
+            &[],
+            Some(&styles),
+            true,
+            "",
+            false,
+            false,
+            false,
+        );
         assert!(
             lines[0].text.contains("\x1b[3;32;47ma"),
             "{:?}",
@@ -2656,6 +2706,9 @@ mod tests {
             &OverlayContext::default(),
             &LineNumbers::none(),
             region.width,
+            false,
+            false,
+            false,
         );
         assert!(frame.contains("\x1b[2;4;32;41ma"), "{frame:?}");
         assert!(frame.contains("\x1b[33;47mL"), "{frame:?}");
@@ -2677,6 +2730,9 @@ mod tests {
             &OverlayContext::default(),
             &LineNumbers::none(),
             region.width,
+            false,
+            false,
+            false,
         );
         assert!(
             frame.contains("\x1b[2;1H\x1b[0m\x1b[36;47mZ   "),
@@ -2713,6 +2769,9 @@ mod tests {
             &OverlayContext::default(),
             &LineNumbers::none(),
             region.width,
+            false,
+            false,
+            false,
         );
         assert!(
             tab.contains("\x1b[1;31;40m \x1b[0m\x1b[37;40m      Z"),
@@ -2729,6 +2788,9 @@ mod tests {
             &OverlayContext::default(),
             &LineNumbers::none(),
             region.width,
+            false,
+            false,
+            false,
         );
         assert!(
             control.contains("\x1b[1;31;40m^A\x1b[0m\x1b[37;40mZ"),
@@ -2749,6 +2811,9 @@ mod tests {
             &OverlayContext::default(),
             &LineNumbers::none(),
             region.width,
+            false,
+            false,
+            false,
         );
         assert!(!eof.contains("31;40m"), "{eof:?}");
     }
@@ -2778,6 +2843,9 @@ mod tests {
             &OverlayContext::default(),
             &LineNumbers::none(),
             12,
+            false,
+            false,
+            false,
         );
         assert!(
             frame.contains("\x1b[3;31;47m       \x1b[0m\x1b[1;34;47mZ"),
@@ -2906,6 +2974,47 @@ mod tests {
         // Native `view_max_text_width` wraps the text at the column.
         assert!(panel.text.contains("abcdefghij"), "{:?}", panel.text);
         assert!(panel.text.contains("klmnopqrst"), "{:?}", panel.text);
+    }
+
+    #[test]
+    fn the_replacement_symbols_follow_the_native_options() {
+        let data = b"a b\n";
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 3,
+        };
+        let mut viewport = Viewport::default();
+        let overlay = OverlayContext {
+            cursors: Vec::new(),
+            match_brackets: false,
+            native_view: true,
+        };
+        let display = WindowDisplay {
+            showspaces: true,
+            shownewlines: true,
+            ..WindowDisplay::default()
+        };
+        let panel = viewport.panel_decorated(
+            data,
+            0,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            None,
+            display,
+            &overlay,
+            None,
+            None,
+        );
+        // Native `view_expand_space` and `view_expand_newline` draw the
+        // replacement symbols.
+        assert!(panel.text.contains('\u{b7}'), "{:?}", panel.text);
+        assert!(panel.text.contains('\u{21b5}'), "{:?}", panel.text);
     }
 
     #[test]
