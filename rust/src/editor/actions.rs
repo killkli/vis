@@ -2953,7 +2953,8 @@ impl Editor {
                     let end_row = top + height;
                     new_top = top + height / 2;
                     // Native `view_scroll_halfpage_down` selects the byte
-                    // where the old view ended, when the file reaches that far.
+                    // where the old view ended; the drawn newline cell makes
+                    // that the first byte of the following row.
                     cursor = Some(if end_row <= last {
                         row_begin(end_row)
                     } else {
@@ -3027,18 +3028,26 @@ impl Editor {
     fn set_primary_cursor(&mut self, cursor: usize) -> Result<(), EditorError> {
         let data = self.text.to_vec();
         let cursor = cursor.min(data.len());
+        let selection = Selection {
+            anchor: if self.is_visual() {
+                self.anchor
+            } else {
+                cursor
+            },
+            cursor,
+        };
+        if cursor == data.len() && self.is_visual() {
+            // Native `view_cursors_to` stores an end-of-text cursor verbatim;
+            // deriving the selection range would round it to the last byte.
+            let id = self.selection_set.primary_id();
+            self.selection_set
+                .update(&data, id, selection)
+                .map_err(|e| EditorError(e.to_string()))?;
+            self.sync_set_to_primary();
+            return Ok(());
+        }
         self.selection_set
-            .replace_primary(
-                &data,
-                Selection {
-                    anchor: if self.is_visual() {
-                        self.anchor
-                    } else {
-                        cursor
-                    },
-                    cursor,
-                },
-            )
+            .replace_primary(&data, selection)
             .map_err(|e| EditorError(e.to_string()))?;
         self.sync_set_to_primary();
         Ok(())
