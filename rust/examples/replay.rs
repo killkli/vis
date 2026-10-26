@@ -56,7 +56,9 @@ fn token(name: &str) -> Result<Option<Key>, ReplayError> {
         "tab" => Key::Tab,
         "s-tab" | "backtab" => Key::BackTab,
         "backspace" | "bs" | "c-h" => Key::Backspace,
-        "delete" | "del" => Key::Delete,
+        // Native `vis:feedkeys` cannot express `<Delete>` or `<Insert>`: the
+        // notation is consumed byte by byte instead of reaching the bindings,
+        // so the driver refuses them rather than replaying a different key.
         "left" => Key::Left,
         "right" => Key::Right,
         "up" => Key::Up,
@@ -65,7 +67,7 @@ fn token(name: &str) -> Result<Option<Key>, ReplayError> {
         "end" => Key::End,
         "pageup" | "page-up" => Key::PageUp,
         "pagedown" | "page-down" => Key::PageDown,
-        "insert" | "ins" => Key::Insert,
+        // `<Insert>` has the same feedkeys limitation as `<Delete>` above.
         "s-left" => Key::ShiftLeft,
         "s-right" => Key::ShiftRight,
         "s-pageup" | "s-page-up" => Key::ShiftPageUp,
@@ -138,6 +140,9 @@ fn token(name: &str) -> Result<Option<Key>, ReplayError> {
                 || lower.starts_with("s-")
                 || lower.starts_with("page")
                 || lower == "insert"
+                || lower == "ins"
+                || lower == "delete"
+                || lower == "del"
                 || lower
                     .strip_prefix('f')
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
