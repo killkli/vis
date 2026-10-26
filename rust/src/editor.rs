@@ -3671,8 +3671,9 @@ impl Editor {
             return Ok(EditorAction::Continue);
         }
         let jump = Self::jump_motion_key(key) && !(key == Key::Char('%') && self.count.is_some());
-        if let Some((target, inclusive, linewise)) = self.motion(key)? {
-            let action = self.finish_motion(target, inclusive, linewise)?;
+        if let Some((target, inclusive, linewise, linewise_inclusive)) = self.motion(key)? {
+            let action =
+                self.finish_motion_native(target, inclusive, linewise, linewise_inclusive)?;
             if jump {
                 self.jumplist_save();
             }
@@ -4163,7 +4164,7 @@ impl Editor {
             .ok_or_else(|| EditorError("count limit exceeded".into()))
     }
 
-    fn motion(&mut self, key: Key) -> Result<Option<(usize, bool, bool)>, EditorError> {
+    fn motion(&mut self, key: Key) -> Result<Option<(usize, bool, bool, bool)>, EditorError> {
         self.motion_targets.clear();
         if self.selection_set.len() == 1 {
             return self.motion_one(key);
@@ -4180,7 +4181,7 @@ impl Editor {
             self.count = original_count;
             self.preferred_column = original_column;
             let target = self.motion_one(key)?;
-            let Some((cursor, inclusive, linewise)) = target else {
+            let Some((cursor, inclusive, linewise, linewise_inclusive)) = target else {
                 self.cursor = original_cursor;
                 self.count = original_count;
                 self.preferred_column = original_column;
@@ -4196,7 +4197,7 @@ impl Editor {
                 cursor,
             });
             if index == primary {
-                result = Some((cursor, inclusive, linewise));
+                result = Some((cursor, inclusive, linewise, linewise_inclusive));
                 preferred = self.preferred_column;
             }
         }
@@ -4206,7 +4207,7 @@ impl Editor {
         Ok(result)
     }
 
-    fn motion_one(&mut self, key: Key) -> Result<Option<(usize, bool, bool)>, EditorError> {
+    fn motion_one(&mut self, key: Key) -> Result<Option<(usize, bool, bool, bool)>, EditorError> {
         let data = self.text.to_vec();
         let mut pos = self.cursor;
         let count = self.count.unwrap_or(1);
@@ -4220,6 +4221,7 @@ impl Editor {
         };
         let mut inclusive = false;
         let mut linewise = false;
+        let mut linewise_inclusive = false;
         if matches!(key, Key::Char('+' | '-')) {
             if self.is_visual() {
                 return Ok(None);
@@ -4236,12 +4238,13 @@ impl Editor {
                 pos = next;
             }
             self.count = None;
-            return Ok(Some((motion::line_start(&data, pos), false, true)));
+            return Ok(Some((motion::line_start(&data, pos), false, true, false)));
         }
         if key == Key::Char('%') && self.count.is_some() {
             self.count = None;
             return Ok(Some((
                 data.len() / 100 * count.min(100) + data.len() % 100 * count.min(100) / 100,
+                false,
                 false,
                 false,
             )));
@@ -4267,12 +4270,15 @@ impl Editor {
                 pos = self.column_position(&data, next, column);
             }
             self.count = None;
-            return Ok(Some((pos, false, true)));
+            return Ok(Some((pos, false, true, true)));
         }
         if key == Key::Char('G') {
+            // G without a count is native FILE_END (LINEWISE_INCLUSIVE);
+            // a counted G is the non-inclusive line motion.
             pos = if let Some(line) = self.count {
                 Self::line_number(&data, line)
             } else {
+                linewise_inclusive = true;
                 motion::line_begin(&data, data.len().saturating_sub(1))
             };
             linewise = true;
@@ -4303,8 +4309,15 @@ impl Editor {
                 Key::Char('0') | Key::Home => motion::line_begin,
                 Key::Char('^') => motion::line_start,
                 Key::Char('$') | Key::End => motion::line_end,
-                Key::Char('{') => motion::paragraph_prev,
-                Key::Char('}') => motion::paragraph_next,
+                // Native paragraph motions are LINEWISE|JUMP.
+                Key::Char('{') => {
+                    linewise = true;
+                    motion::paragraph_prev
+                }
+                Key::Char('}') => {
+                    linewise = true;
+                    motion::paragraph_next
+                }
                 Key::Char('(') => motion::sentence_prev,
                 Key::Char(')') => motion::sentence_next,
                 Key::Char('%') => {
@@ -4353,7 +4366,12 @@ impl Editor {
             }
         }
         self.count = None;
-        Ok(Some((pos.min(data.len()), inclusive, linewise)))
+        Ok(Some((
+            pos.min(data.len()),
+            inclusive,
+            linewise,
+            linewise_inclusive,
+        )))
     }
 
     fn line_number(data: &[u8], line: usize) -> usize {
@@ -4409,6 +4427,28 @@ impl Editor {
         inclusive: bool,
         linewise: bool,
     ) -> Result<EditorAction, EditorError> {
+        self.finish_motion_with(target, inclusive, linewise, None)
+    }
+
+    /// Finish a motion whose native type is known, including whether a
+    /// linewise motion is `LINEWISE_INCLUSIVE` (`j`/`k`, `G` without a count).
+    fn finish_motion_native(
+        &mut self,
+        target: usize,
+        inclusive: bool,
+        linewise: bool,
+        linewise_inclusive: bool,
+    ) -> Result<EditorAction, EditorError> {
+        self.finish_motion_with(target, inclusive, linewise, Some(linewise_inclusive))
+    }
+
+    fn finish_motion_with(
+        &mut self,
+        target: usize,
+        inclusive: bool,
+        linewise: bool,
+        linewise_inclusive: Option<bool>,
+    ) -> Result<EditorAction, EditorError> {
         if !self.motion_targets.is_empty() {
             self.external_marks.clear();
             let targets = std::mem::take(&mut self.motion_targets);
@@ -4423,7 +4463,7 @@ impl Editor {
                         let start = source.cursor.min(target.cursor);
                         let end = source.cursor.max(target.cursor);
                         if linewise {
-                            motion::line_begin(&data, start)..motion::line_next(&data, end)
+                            self.linewise_operator_range(&data, start, end, linewise_inclusive)
                         } else {
                             start..if inclusive && target.cursor > source.cursor {
                                 motion::char_next(&data, end)
@@ -4447,7 +4487,7 @@ impl Editor {
             let start = self.cursor.min(target);
             let end = self.cursor.max(target);
             let range = if linewise {
-                motion::line_begin(&data, start)..motion::line_next(&data, end)
+                self.linewise_operator_range(&data, start, end, linewise_inclusive)
             } else {
                 start..if inclusive && target > self.cursor {
                     motion::char_next(&data, end)
@@ -4476,6 +4516,36 @@ impl Editor {
             self.sync_set_to_primary();
             self.materialize_visual_lines()?;
             Ok(EditorAction::Continue)
+        }
+    }
+
+    /// Native operator range for a linewise motion. `text_range_linewise`
+    /// expands the start to the line begin and the end to the next line only
+    /// when it is not already at a line begin; `LINEWISE_INCLUSIVE` motions
+    /// first extend the end by one character.
+    fn linewise_operator_range(
+        &self,
+        data: &[u8],
+        start: usize,
+        end: usize,
+        linewise_inclusive: Option<bool>,
+    ) -> Range<usize> {
+        let start = motion::line_begin(data, start);
+        match linewise_inclusive {
+            None => start..motion::line_next(data, end),
+            Some(inclusive) => {
+                let end = if inclusive {
+                    motion::char_next(data, end)
+                } else {
+                    end
+                };
+                let end = if end == motion::line_begin(data, end) {
+                    end
+                } else {
+                    motion::line_next(data, end)
+                };
+                start..end
+            }
         }
     }
 
