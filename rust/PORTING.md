@@ -68,7 +68,8 @@ Sam sessions retain regex/shell registers and per-document marks, support guard
 count/modulo filters, and release closed-file namespaces. Text timestamps and
 time-based restore match C duplicate-time, tie and branch semantics.
 `:earlier`/`:later` accept timestamp units and native argument validation;
-the local-time state notification still needs migration.
+the editor now reports the selected revision's local `HH:MM` time using a
+standard-library-only TZif/POSIX time-zone reader.
 
 Oriented selection sets, stable selection marks and range algebra are implemented.
 The editor supports simultaneous insertion, paste, motions, find, delete/change/
@@ -181,16 +182,17 @@ Optional Lua configuration, live userdata, reentrant registered callbacks,
 function mappings and syntax styles are now implemented; see
 [`LUA_PORTING.md`](LUA_PORTING.md) for their bounded verification and remaining
 API gaps. Stable logical selection identities and per-window last-visual marks
-now survive focus and undo. Real modal prompt windows, mixed editable history and recursive aliases are
-also implemented. Still incomplete: option bindings beyond the fixture corpus,
-some pending-operator combinations and the history state notification. Custom
-wrapping also requires work. The visual mode key table, visual put over an
-empty register and linewise yank now follow the native editor (see the
-visual mode checkpoint below), and paste dot-repeat matches the native
-editor in the key differential. Default build/install/packaging
-migration and remaining helper integration are pending. Core piece lookup/editing
-is linear in piece count; UI frames still flatten buffers and repaint visible
-cells. Existing C builds remain the default.
+now survive focus and undo. Real modal prompt windows, mixed editable history
+and recursive aliases are also implemented. Still incomplete: option bindings
+beyond the fixture corpus, some pending-operator combinations and custom
+wrapping. The visual mode key table, visual put over an empty register and
+linewise yank now follow the native editor (see the visual mode checkpoint
+below); paste dot-repeat matches the native editor in the key differential;
+and `:earlier`/`:later` now display the selected revision's local state time
+(see the history notification checkpoint below). Default build/install/
+packaging migration and remaining helper integration are pending. Core piece
+lookup/editing is linear in piece count; UI frames still flatten buffers and
+repaint visible cells. Existing C builds remain the default.
 
 Language-key translation runs on physical input before macro recording and mode
 bindings, with literal insert/replace input and unmodified replay semantics.
@@ -542,12 +544,34 @@ oracle covers `v`/`V` selections with `x`, `s`, `d`, `c`, `y`, the
 unbound keys, `u`/`U`, counted variants, paste over selections with
 empty and non-empty registers, and dot-repeat sequences such as
 `VjYjp.`; every C-reachable case matches, and the feedkeys-only tokens
-(`<Delete>`, `<Del>`, `<Insert>`) are refused as unsupported because the
-native oracle cannot express them. The replay driver refuses those
-tokens rather than replaying different input. The strict key sweep stays
-at 17 pass with zero mismatches on the default fixture set, the full
-all-feature suite passes 291 tests, the standard-library-only suite and
-strict all-target Clippy pass, and formatting passes. One documented
-notation difference remains: `<C-m>` reaches the editor as `Key::Enter`
+(`Delete`, `Del` and `Insert`) are reported unsupported by the differential
+runner because the native oracle cannot express them as distinct keys;
+the replay binary continues to decode those named keys. The strict key
+sweep recorded 17 pass with zero mismatches on the default fixture set.
+At that checkpoint, the full all-feature suite passed 291 tests, the
+standard-library-only suite and strict all-target Clippy passed, and
+formatting passed.
+One documented notation difference remains: `<C-m>` reaches the editor as `Key::Enter`
 because a terminal cannot send it as a distinct key, while the native
 feedkeys notation discards it in normal mode.
+
+## Local history notification checkpoint (2026-10-26, macOS arm64)
+
+`:earlier` and `:later` now report the selected revision as
+`State from HH:MM`, matching `cmd_earlier_later`'s `localtime_r` and
+`strftime` notification. The standard-library-only `time` module reads
+the configured `TZ` as either a POSIX rule or TZif file; when `TZ` is
+unset it reads `/etc/localtime`. Systems without a usable zone source
+fall back to UTC. TZif v1 and v2/v3/v4 transition tables and POSIX
+footer rules are supported, including northern/southern DST, `M`, `J`
+and zero-based Julian transition dates.
+
+Verification: nine deterministic local-time tests cover fixed-offset
+signs, DST transition boundaries, southern-hemisphere rules, Julian
+rules, TZif transition tables and footers, a named zoneinfo path and
+the host `/etc/localtime` compared with `date`. An interactive PTY
+comparison with `TZ=Asia/Taipei` observed the same `State from HH:MM`
+message from C vis and vis-rs after `:earlier`. An editor-level
+contract test checks both `:earlier` and `:later` messages against the
+selected revision. This does not provide Windows local-zone lookup
+when `TZ` is unset; that environment falls back to UTC.
