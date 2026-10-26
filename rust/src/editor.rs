@@ -4734,7 +4734,10 @@ impl Editor {
                     linewise,
                     true,
                 );
-                if !linewise || was_visual {
+                // Native `op_yank` returns the cursor position for linewise
+                // ranges and the range start otherwise, so a linewise yank
+                // never moves the cursor.
+                if !linewise {
                     self.cursor = range.start;
                 }
             }
@@ -4771,6 +4774,11 @@ impl Editor {
             Operator::ShiftLeft | Operator::ShiftRight => {
                 self.shift(range, matches!(operator, Operator::ShiftRight))?
             }
+        }
+        if was_visual {
+            // Native `vis_mode_visual_leave` keeps only the cursor endpoints;
+            // the operator already resolved the final primary cursor.
+            self.set_cursors(vec![self.cursor], self.primary_index())?;
         }
         Ok(EditorAction::Continue)
     }
@@ -4848,7 +4856,6 @@ impl Editor {
             self.shift_ranges(ranges, matches!(operator, Operator::ShiftRight))?;
             return Ok(EditorAction::Continue);
         }
-        let was_visual = self.is_visual();
         self.mode = Mode::Normal;
         self.store_many_registers(&ranges, linewise, matches!(operator, Operator::Yank));
         match operator {
@@ -4862,7 +4869,9 @@ impl Editor {
                     .iter()
                     .enumerate()
                     .map(|(index, range)| {
-                        if linewise && !was_visual {
+                        // Native `op_yank` keeps every cursor in place for a
+                        // linewise yank and moves to the range start otherwise.
+                        if linewise {
                             self.selection_set.selections()[index].cursor
                         } else {
                             range.start
