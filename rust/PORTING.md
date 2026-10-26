@@ -704,9 +704,12 @@ equal values with the 360 non-native `it`/`at` sequences excluded, and a
 4,992-case motion/operator/count matrix reports 4,896 equal values with the 96
 unbound `g^` sequences excluded. Insert and option matrices (54 and 32 cases),
 plus focused fixtures for punctuation searches, counted line motions, failed
-finds, insert registers, window slides and the `set` grammar, pass in the key
-differential. The key sweep passes 135/0 with four upstream-disabled
-exclusions; all-target tests, strict Clippy, formatting and the seven PTY view
-checks pass. The matrices are bounded; the native parser's redispatch of
-invalid key prefixes (for example `d[}`) and non-native text objects are not
-reproduced.
+finds, insert registers, window slides, operator searches, named registers and the
+`set` grammar, pass in the key differential. The core key sweep passes 139/0
+with four upstream-disabled exclusions and the Lua sweep 142/0 with one. The
+native-action differential, the 56-case Sam session differential, the view
+coordinate differential and the sixteen PTY cases pass, as do all-target tests
+in both feature configurations, strict Clippy and formatting. The matrices are
+bounded; the native parser's redispatch of invalid key prefixes (for example
+`d[}`), its unsupported visual repeat and bare-dot operator-pending states, and
+non-native text objects are not reproduced.
