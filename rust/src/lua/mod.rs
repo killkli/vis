@@ -728,7 +728,7 @@ impl Inner {
             return Some(OptionScope::Global);
         }
         match name {
-            "autoindent" | "ai" => Some(OptionScope::Global),
+            "autoindent" | "ai" | "shell" | "escdelay" => Some(OptionScope::Global),
             "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof" => {
                 Some(OptionScope::Window)
             }
@@ -775,7 +775,20 @@ impl Inner {
                         },
                     };
                 }
-                Ok(Value::Boolean(self.workspace.borrow().editor.auto_indent))
+                match name {
+                    "autoindent" | "ai" => {
+                        Ok(Value::Boolean(self.workspace.borrow().editor.auto_indent))
+                    }
+                    "shell" => {
+                        let shell = self.workspace.borrow().editor.shell();
+                        Ok(Value::String(self.lua.create_string(shell)?))
+                    }
+                    "escdelay" => Ok(match self.workspace.borrow().editor.escape_delay() {
+                        Some(delay) => Value::Integer(delay.as_millis() as i64),
+                        None => Value::Nil,
+                    }),
+                    _ => Ok(Value::Nil),
+                }
             }
             OptionTarget::Window(id) => {
                 let ws = self.workspace.borrow();
@@ -855,6 +868,33 @@ impl Inner {
                 return Ok(!matches!(returns.back(), Some(Value::Boolean(false))));
             }
             let mut ws = self.workspace.borrow_mut();
+            match name {
+                "shell" => {
+                    let shell = match value {
+                        Value::String(shell) => Some(shell.to_str()?.to_string()),
+                        Value::Nil => None,
+                        _ => return Err(mlua::Error::runtime("expected shell program name")),
+                    };
+                    ws.editor.set_shell(shell);
+                    return Ok(true);
+                }
+                "escdelay" => {
+                    let delay = match value {
+                        Value::Integer(milliseconds) if milliseconds >= 0 => {
+                            Some(std::time::Duration::from_millis(milliseconds as u64))
+                        }
+                        Value::Nil => None,
+                        _ => {
+                            return Err(mlua::Error::runtime(
+                                "expected escape delay in milliseconds",
+                            ));
+                        }
+                    };
+                    ws.editor.set_escape_delay(delay);
+                    return Ok(true);
+                }
+                _ => {}
+            }
             ws.editor.auto_indent = if toggle {
                 !ws.editor.auto_indent
             } else {
@@ -2752,6 +2792,12 @@ mod tests {
         runtime.eval(r#"
             local source=vis.win
             assert(getmetatable(vis.options)==vis.types.visoptions)
+            assert(type(vis.options.shell)=='string')
+            assert(vis.options.shell~='')
+            vis.options.shell='/bin/dash'
+            assert(vis.options.shell=='/bin/dash')
+            vis.options.escdelay=50
+            assert(vis.options.escdelay==50)
             source.options.tabwidth=4
             assert(vis.options.tabwidth==nil and source.options.autoindent==nil)
             vis.options.tabwidth=99

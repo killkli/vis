@@ -383,6 +383,9 @@ pub struct Terminal {
     decoder: Decoder,
     escape_since: Option<Instant>,
     viewports: BTreeMap<usize, Viewport>,
+    /// Native `escdelay` option: how long an incomplete escape sequence is
+    /// collected before it is read as a plain escape key.
+    escape_delay: Duration,
 }
 
 impl Terminal {
@@ -421,6 +424,7 @@ impl Terminal {
             decoder: Decoder::default(),
             escape_since: None,
             viewports: BTreeMap::new(),
+            escape_delay: ESCAPE_DELAY,
         };
         terminal
             .tty
@@ -431,6 +435,11 @@ impl Terminal {
 
     pub fn dimensions(&self) -> (usize, usize) {
         self.size
+    }
+
+    /// Apply the native `escdelay` option.
+    pub fn set_escape_delay(&mut self, delay: Duration) {
+        self.escape_delay = delay;
     }
 
     /// Cancel an incomplete key or paste when the application receives SIGINT.
@@ -454,13 +463,13 @@ impl Terminal {
             let elapsed = self.escape_since.map(|instant| instant.elapsed());
             if let Some(event) = self
                 .decoder
-                .next(elapsed.is_some_and(|time| time >= ESCAPE_DELAY))?
+                .next(elapsed.is_some_and(|time| time >= self.escape_delay))?
             {
                 self.escape_since = None;
                 return Ok(event);
             }
             let delay = elapsed.map_or(REFRESH_DELAY, |elapsed| {
-                ESCAPE_DELAY.saturating_sub(elapsed)
+                self.escape_delay.saturating_sub(elapsed)
             });
             let timeout = Timespec {
                 tv_sec: 0,

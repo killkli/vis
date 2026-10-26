@@ -116,6 +116,18 @@ impl Workspace {
                     }
                     "expandtab" | "et" => expand = boolean(expand)?,
                     "autoindent" | "ai" => auto = boolean(auto)?,
+                    "shell" => {
+                        let shell =
+                            value.ok_or_else(|| invalid("shell option requires a program"))?;
+                        self.editor.set_shell(Some(shell.to_string()));
+                    }
+                    "escdelay" => {
+                        let delay = value
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .ok_or_else(|| invalid("escape delay must be a number"))?;
+                        self.editor
+                            .set_escape_delay(Some(std::time::Duration::from_millis(delay)));
+                    }
                     "statusbar" | "sb" | "showeof" => {
                         let mut display = self
                             .window_display(request.window)

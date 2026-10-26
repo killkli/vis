@@ -112,6 +112,13 @@ The first visible row is anchored to its content with a text mark, like native
 instead of moving the window. The anchor travels with the window while it is
 unfocused and is dropped when its line disappears.
 
+The native `shell` and `escdelay` options are wired: external commands run
+through the configured shell (the environment `SHELL` and then `/bin/sh` are
+the fallbacks) and the escape delay decides how long an incomplete escape
+sequence is collected before it is read as a plain escape key. The `:set`
+command now follows the native `set option [value]` shape, so a value may
+follow the option name or be attached with `=`.
+
 The native default key tables are wired. A host test parses `config.def.h`,
 resolves every one of the 208 bindings to the key sequence it stands for and
 drives a fresh editor in the mode the native table applies to, so a missing
@@ -435,7 +442,8 @@ and no unsupported action.
 Window motions clamp to the last row that holds source cells rather than the
 virtual EOF cursor row, matching native `L` in short files.
 
-Verification: the anchor tests in `rust/tests/view_anchor.rs`, the default
+Verification: the option tests in `rust/tests/global_options.rs`, the anchor
+tests in `rust/tests/view_anchor.rs`, the default
 binding test in `rust/tests/default_bindings.rs`,
 eleven host tests in `rust/tests/viewport_motions.rs` plus
 view-module unit tests cover row lookup, counts, source-row clamping, wrapped

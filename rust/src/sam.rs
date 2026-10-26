@@ -151,10 +151,12 @@ pub struct Change {
 /// Editor-wide regex/shell registers, directory, and per-document mark sets.
 /// Parsing a valid regex or shell command updates its register immediately,
 /// including when a later part of the script fails to parse, as in C vis.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Session {
     previous_regex: Option<String>,
     previous_shell: Option<String>,
+    /// Native `shell` option: the program used for external commands.
+    shell: PathBuf,
     documents: Vec<(Mark, BTreeMap<char, Vec<Mark>>)>,
     directory: Option<PathBuf>,
     #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
@@ -163,9 +165,35 @@ pub struct Session {
     process_group_observer: Option<ProcessGroupObserver>,
 }
 
+/// Native `shell` default: the environment `SHELL`, then `/bin/sh`.
+fn default_shell() -> PathBuf {
+    std::env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            previous_regex: None,
+            previous_shell: None,
+            shell: default_shell(),
+            documents: Vec::new(),
+            directory: None,
+            #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
+            interrupt: None,
+            #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
+            process_group_observer: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ShellContext<'a> {
     directory: Option<&'a Path>,
+    /// Native `shell` option: the program used for external commands.
+    shell: &'a Path,
     #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
     interrupt: Option<&'a AtomicBool>,
     #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
@@ -199,6 +227,20 @@ impl Session {
     }
     pub fn previous_shell(&self) -> Option<&str> {
         self.previous_shell.as_deref()
+    }
+
+    /// Native `shell` option. Without it the environment `SHELL` is used, and
+    /// `/bin/sh` is the last resort.
+    pub fn set_shell(&mut self, shell: Option<String>) {
+        self.shell = match shell {
+            Some(shell) if !shell.is_empty() => PathBuf::from(shell),
+            _ => default_shell(),
+        };
+    }
+
+    /// The program used to run external commands.
+    pub fn shell_path(&self) -> &Path {
+        &self.shell
     }
 
     pub fn set_previous_regex(&mut self, pattern: &str) -> Result<(), SamError> {
@@ -334,6 +376,7 @@ impl Session {
     fn shell_context(&self) -> ShellContext<'_> {
         ShellContext {
             directory: self.directory.as_deref(),
+            shell: self.shell_path(),
             #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
             interrupt: self.interrupt.as_deref(),
             #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
@@ -1781,6 +1824,7 @@ fn run_shell(
     context: ShellContext<'_>,
     offset: usize,
 ) -> Result<Vec<u8>, SamError> {
+    let shell = context.shell;
     use std::io::Write;
     use std::process::{Command as ProcessCommand, Stdio};
     let io_error = |error| SamError::new(offset, format!("shell I/O: {error}"));
@@ -1802,7 +1846,7 @@ fn run_shell(
     if context.interrupted() {
         return Err(SamError::new(offset, "shell command cancelled"));
     }
-    let mut process = ProcessCommand::new("/bin/sh");
+    let mut process = ProcessCommand::new(shell);
     process.args(["-c", command]);
     if let Some(directory) = context.directory {
         process.current_dir(directory);

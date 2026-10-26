@@ -570,6 +570,8 @@ pub struct Editor {
     /// First display row the next frame should show, set by scroll actions.
     /// Consumed after one render so later cursor motions auto-follow again.
     scroll_request: Option<usize>,
+    /// Native `escdelay` option.
+    escape_delay: Option<std::time::Duration>,
     /// Native `view->start_mark`: the first displayed row is tracked by a text
     /// mark, so edits above the view keep the visible content in place.
     view_anchor: Option<crate::text::Mark>,
@@ -670,6 +672,7 @@ impl Editor {
             },
             scroll_request: None,
             view_anchor: None,
+            escape_delay: None,
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -2429,6 +2432,26 @@ impl Editor {
                 },
             );
         }
+    }
+
+    /// Native `shell` option: the program used for external commands.
+    pub fn set_shell(&mut self, shell: Option<String>) {
+        self.session.set_shell(shell);
+    }
+
+    /// The program used for external commands.
+    pub fn shell(&self) -> String {
+        self.session.shell_path().to_string_lossy().into_owned()
+    }
+
+    /// Native `escdelay` option: milliseconds to wait before an `Escape`
+    /// sequence is read as a plain escape key.
+    pub fn set_escape_delay(&mut self, delay: Option<std::time::Duration>) {
+        self.escape_delay = delay;
+    }
+
+    pub fn escape_delay(&self) -> Option<std::time::Duration> {
+        self.escape_delay
     }
 
     pub fn set_directory(&mut self, path: &std::path::Path) {
@@ -6440,29 +6463,74 @@ impl Editor {
             "q" | "quit" => return Ok(EditorAction::Quit { force }),
             "set" => {
                 let result = (|| -> Result<(), EditorError> {
-                    for option in arg.split_whitespace() {
-                        match option {
-                            "expandtab" | "et" => self.expand_tab = true,
+                    // Native `set option [value]`: the option name comes first
+                    // and an option that takes a value reads the next word.
+                    let mut tokens = arg.split_whitespace().peekable();
+                    while let Some(option) = tokens.next() {
+                        let (name, inline) = match option.split_once('=') {
+                            Some((name, value)) => (name, Some(value.to_string())),
+                            None => (option, None),
+                        };
+                        let boolean = |value: Option<&str>| -> Result<bool, EditorError> {
+                            match value {
+                                None => Ok(true),
+                                Some("1" | "true" | "yes" | "on") => Ok(true),
+                                Some("0" | "false" | "no" | "off") => Ok(false),
+                                Some(_) => Err(EditorError("expected boolean option value".into())),
+                            }
+                        };
+                        match name {
+                            "expandtab" | "et" => self.expand_tab = boolean(inline.as_deref())?,
                             "noexpandtab" | "noet" => self.expand_tab = false,
-                            "autoindent" | "ai" => self.auto_indent = true,
+                            "autoindent" | "ai" => self.auto_indent = boolean(inline.as_deref())?,
                             "noautoindent" | "noai" => self.auto_indent = false,
-                            _ => {
-                                if let Some(value) = option
-                                    .strip_prefix("tabwidth=")
-                                    .or_else(|| option.strip_prefix("tw="))
-                                {
-                                    self.tab_width = value
-                                        .parse::<usize>()
-                                        .ok()
-                                        .filter(|n| (1..=8).contains(n))
+                            "tabwidth" | "tw" => {
+                                let value = match inline {
+                                    Some(value) => value,
+                                    None => tokens
+                                        .next()
                                         .ok_or_else(|| {
                                             EditorError("tab width must be 1..8".into())
-                                        })?;
-                                } else {
-                                    return Err(EditorError(format!(
-                                        "unsupported option: {option}"
-                                    )));
-                                }
+                                        })?
+                                        .to_string(),
+                                };
+                                self.tab_width = value
+                                    .parse::<usize>()
+                                    .ok()
+                                    .filter(|n| (1..=8).contains(n))
+                                    .ok_or_else(|| EditorError("tab width must be 1..8".into()))?;
+                            }
+                            "shell" => {
+                                let value = match inline {
+                                    Some(value) => value,
+                                    None => tokens
+                                        .next()
+                                        .ok_or_else(|| {
+                                            EditorError("Expecting string option value".into())
+                                        })?
+                                        .to_string(),
+                                };
+                                self.set_shell(Some(value));
+                            }
+                            "escdelay" => {
+                                let value = match inline {
+                                    Some(value) => value,
+                                    None => tokens
+                                        .next()
+                                        .ok_or_else(|| {
+                                            EditorError("escape delay must be a number".into())
+                                        })?
+                                        .to_string(),
+                                };
+                                let milliseconds = value.parse::<u64>().map_err(|_| {
+                                    EditorError("escape delay must be a number".into())
+                                })?;
+                                self.set_escape_delay(Some(std::time::Duration::from_millis(
+                                    milliseconds,
+                                )));
+                            }
+                            _ => {
+                                return Err(EditorError(format!("Unknown option: `{name}`")));
                             }
                         }
                     }

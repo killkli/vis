@@ -980,6 +980,14 @@ fn run_interactive_session(
                 break InputEvent::Timeout;
             }
         };
+        // The native `escdelay` option changes how long an incomplete escape
+        // sequence is collected.
+        if let Some(delay) = host.workspace.borrow().editor.escape_delay() {
+            terminal.with(|terminal| {
+                terminal.set_escape_delay(delay);
+                Ok(())
+            })?;
+        }
         let outcome = match event {
             InputEvent::Message(text) => Ok(Outcome::Message(text)),
             InputEvent::Key(key) => host.handle_key(key),
