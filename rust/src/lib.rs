@@ -16,6 +16,7 @@ pub mod selection;
 pub mod style;
 pub mod text;
 pub mod view;
+mod width;
 pub mod workspace;
 
 #[cfg(feature = "lua")]

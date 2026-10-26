@@ -112,6 +112,11 @@ The first visible row is anchored to its content with a text mark, like native
 instead of moving the window. The anchor travels with the window while it is
 unfocused and is dropped when its line disappears.
 
+The display widths follow the Unicode character database instead of a coarse
+approximation: the generated tables list the zero width and the wide
+characters, which fixes several thousand code points that the previous ranges
+guessed wrong.
+
 The native `shell` and `escdelay` options are wired: external commands run
 through the configured shell (the environment `SHELL` and then `/bin/sh` are
 the fallbacks) and the escape delay decides how long an incomplete escape
@@ -144,8 +149,8 @@ API gaps. Stable logical selection identities and per-window last-visual marks
 now survive focus and undo. Real modal prompt windows, mixed editable history and recursive aliases are
 also implemented. Still incomplete: option bindings beyond the fixture corpus,
 some pending-operator combinations, case/completion operations,
-paste dot-repeat and the history state notification. Custom wrapping and precise
-Unicode widths also require work. Default build/install/packaging
+paste dot-repeat and the history state notification. Custom wrapping also
+requires work. Default build/install/packaging
 migration and remaining helper integration are pending. Core piece lookup/editing
 is linear in piece count; UI frames still flatten buffers and repaint visible
 cells. Existing C builds remain the default.
@@ -184,8 +189,11 @@ Known compatibility differences and limits:
   in-place write can leave partial data. Explicit atomic replacement preserves
   Unix owner/group/mode, rejects linked files, and does not copy ACLs/xattrs.
   Conflict checks are best effort, not filesystem locks.
-* Width and combining tables approximate the original `wcwidth` behavior. The
-  motion differential corpus verifies ASCII/control inputs, not full Unicode.
+* Display widths follow the Unicode character database: characters in the
+  combining and format categories occupy no column, characters with an East
+  Asian width of `Wide` or `Fullwidth` occupy two. The tables are generated
+  from one Unicode version, while the native editor asks the system locale,
+  so a few code points differ from a system with a different Unicode version.
 * A cursor that jumps outside the measured body is centered by half a page,
   like native `view_cursors_to`, while native line motions keep scrolling the
   view row by row and leave the cursor on the last or first visible row.
