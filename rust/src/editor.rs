@@ -3495,7 +3495,17 @@ impl Editor {
                     };
                     self.last_find = Some(find);
                     let count = self.combined_count()?;
+                    let origin = self.cursor;
                     let (target, inclusive) = self.find_targets(find, count);
+                    // A native `COUNT_EXACT` find/till that does not move drops
+                    // the pending operator (change still opens the insert).
+                    if self.operator.is_some()
+                        && !matches!(self.operator, Some(Operator::Change))
+                        && target == origin
+                    {
+                        self.cancel();
+                        return Ok(EditorAction::Continue);
+                    }
                     return self.finish_motion(target, inclusive, false);
                 }
                 return Err(EditorError("character expected".into()));
@@ -4304,7 +4314,7 @@ impl Editor {
             // G without a count is native FILE_END (LINEWISE_INCLUSIVE);
             // a counted G is the non-inclusive line motion.
             pos = if let Some(line) = self.count {
-                Self::line_number(&data, line)
+                motion::line_start(&data, Self::line_number(&data, line))
             } else {
                 linewise_inclusive = true;
                 motion::line_begin(&data, data.len().saturating_sub(1))
@@ -4637,6 +4647,7 @@ impl Editor {
             }));
         }
         let data = self.text.to_vec();
+        let explicit_count = self.count.is_some();
         let count = self.take_count();
         if self.selection_set.len() > 1 {
             self.motion_targets.clear();
@@ -4657,14 +4668,20 @@ impl Editor {
                 }
             }
             let (target, inclusive, linewise) = result.expect("selection set has a primary");
-            let action = self.finish_motion(target, inclusive, linewise)?;
+            // `gg` without a count is FILE_BEGIN, which carries the native
+            // LINEWISE_INCLUSIVE flag; a counted `gg` is the plain line motion.
+            let native_inclusive = key == Key::Char('g') && !explicit_count;
+            let action =
+                self.finish_motion_with(target, inclusive, linewise, Some(native_inclusive))?;
             if key == Key::Char('g') {
                 self.jumplist_save();
             }
             return Ok(action);
         }
         let (target, inclusive, linewise) = Self::g_target(&data, self.cursor, key, count)?;
-        let action = self.finish_motion(target, inclusive, linewise)?;
+        let native_inclusive = key == Key::Char('g') && !explicit_count;
+        let action =
+            self.finish_motion_with(target, inclusive, linewise, Some(native_inclusive))?;
         if key == Key::Char('g') {
             self.jumplist_save();
         }
@@ -4683,7 +4700,11 @@ impl Editor {
         count: usize,
     ) -> Result<(usize, bool, bool), EditorError> {
         let (target, inclusive, linewise) = match key {
-            Key::Char('g') => (Self::line_number(data, count), false, true),
+            Key::Char('g') => (
+                motion::line_start(data, Self::line_number(data, count)),
+                false,
+                true,
+            ),
             Key::Char('e') => {
                 let mut p = cursor;
                 for _ in 0..count {
@@ -6147,6 +6168,7 @@ impl Editor {
             _ => return Err(EditorError("replacement character expected".into())),
         };
         let data = self.text.to_vec();
+        let explicit_count = self.count.is_some();
         let count = self.take_count();
         if self.selection_set.len() > 1 {
             let visual = self.is_visual();

@@ -69,6 +69,11 @@ BUILTINS = [
     ("insert-linewise-register", b"one two three\nfour five\n", "yyA<C-r>0<Escape>"),
     ("insert-counted-register", b"one two three\nfour five\n", "yy2i<C-r>0<Escape>"),
     ("insert-charwise-register", b"one two three\nfour five\n", "yiw3A<C-r>0<Escape>"),
+    ("counted-line-motion", b"one two three\nfour five\nsix seven\n", "2dgg"),
+    ("counted-file-end-motion", b"void f(int a) {\n\tif (a) {\n\t\tcall(a[2]);\n\t}\n}\n", "2dG"),
+    ("counted-line-shift", b"one two three\nfour five\nsix seven\n", "2>gg"),
+    ("failed-find-operator", b"one two three\nfour five\nsix seven\n", ">fz"),
+    ("failed-find-change", b"one two three\nfour five\nsix seven\n", "cfzX<Escape>"),
     ("percent-scans-forward", b"alpha.beta, gamma_delta (x) [y] {z}\n", "d%"),
 ]
 
