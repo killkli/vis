@@ -3736,13 +3736,26 @@ impl Editor {
                 let data = self.text.to_vec();
                 let name = std::mem::replace(&mut self.selected_mark, '\'');
                 let saved = self.saved_ranges(name);
-                match key {
-                    Key::Char('|') => self.selection_set.union_with(&data, &saved),
-                    Key::Char('&') => self.selection_set.intersect_with(&data, &saved),
-                    Key::Char('\\') => self.selection_set.subtract(&data, &saved),
-                    _ => self.selection_set.invert(&data),
+                let current = self
+                    .selection_set
+                    .ranges(&data)
+                    .map_err(|e| EditorError(e.to_string()))?;
+                let ranges = match key {
+                    Key::Char('|') => crate::selection::union(&current, &saved, data.len()),
+                    Key::Char('&') => crate::selection::intersection(&current, &saved, data.len()),
+                    Key::Char('\\') => crate::selection::minus(&current, &saved, data.len()),
+                    _ => crate::selection::complement(&current, data.len()),
                 }
                 .map_err(|e| EditorError(e.to_string()))?;
+                self.selection_set
+                    .set_ranges(&data, ranges.clone())
+                    .map_err(|e| EditorError(e.to_string()))?;
+                if ranges.is_empty() {
+                    // Native `selections_set` clears the remaining selection
+                    // when the algebraic result is empty.
+                    let primary = self.selection_set.primary_id();
+                    self.anchored.insert(primary, false);
+                }
                 if !self.is_visual() {
                     self.selection_set
                         .collapse_all(&data)
