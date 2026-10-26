@@ -53,6 +53,12 @@ BUILTINS = [
     ("visual-backward", b"one two\n", "v2lo"),
     ("structural-selections", b"a b a\n", ":,x/a/<Enter>"),
     ("secondary-cursor-escape", b"a b a\n", ":,x/a/<Enter><Escape>"),
+    ("pending-find-repeat-delete", b"one two three\nfour five\nsix\n", "d;w"),
+    ("counted-change-to-eof-linewise", b"one two three\nfour five\nsix\n", "2c3wX<Escape>"),
+    ("counted-visual-put-dot-repeat", b"one two three\nfour five\nsix\n", "2VjP."),
+    ("counted-visual-line-motion", b"one two three\nfour five\nsix\n", "2Vj"),
+    ("counted-visual-char-escape", b"one two\n", "2v"),
+    ("named-yank-does-not-replace-unnamed", b"one two three\nfour five\nsix\n", "\"ayyjVjP."),
 ]
 
 DEFAULT_FIXTURES = [

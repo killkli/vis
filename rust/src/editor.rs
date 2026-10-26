@@ -7546,6 +7546,62 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn missing_find_repeat_does_not_cancel_pending_operators() {
+        let mut e = editor(b"one two three\n");
+        keys(&mut e, "d;w");
+        assert_eq!(e.text.to_vec(), b"two three\n");
+
+        let mut e = editor(b"one two\n");
+        keys(&mut e, "c,wX");
+        escape(&mut e);
+        assert_eq!(e.text.to_vec(), b"X two\n");
+    }
+
+    #[test]
+    fn operator_change_at_eof_keeps_native_linewise_newlines() {
+        let mut e = editor(b"one two three\nfour five\nsix\n");
+        keys(&mut e, "2c3wX");
+        escape(&mut e);
+        assert_eq!(e.text.to_vec(), b"X\n\n");
+    }
+
+    #[test]
+    fn visual_line_entry_consumes_count_and_escape_resets_charwise_count() {
+        let mut e = editor(b"one two three\nfour five\nsix\n");
+        keys(&mut e, "2Vj");
+        assert_eq!(e.mode, Mode::VisualLine);
+        assert_eq!(e.cursor, 23);
+        assert_eq!(e.selection_ranges(), vec![0..24]);
+
+        let mut e = editor(b"one two\n");
+        keys(&mut e, "2v");
+        e.handle_key(Key::Escape).unwrap();
+        assert_eq!(e.mode, Mode::Visual);
+        e.handle_key(Key::Escape).unwrap();
+        assert_eq!(e.mode, Mode::Normal);
+
+        let mut e = editor(b"one two three\nfour five\nsix\n");
+        keys(&mut e, "2VjP");
+        assert_eq!(e.text.to_vec(), b"six\n");
+        keys(&mut e, ".");
+        assert_eq!(e.text.to_vec(), b"six\n");
+    }
+
+    #[test]
+    fn explicit_named_yank_does_not_replace_unnamed_put_register() {
+        let mut e = editor(b"one two three\nfour five\nsix\n");
+        keys(&mut e, "\"ayy");
+        assert_eq!(e.register('a').unwrap().bytes, b"one two three\n");
+        assert!(
+            e.register('"')
+                .is_none_or(|register| register.bytes.is_empty())
+        );
+
+        keys(&mut e, "jVjP.");
+        assert_eq!(e.text.to_vec(), b"one two three\n");
+    }
     #[test]
     fn insert_unicode_binary_and_grouped_undo() {
         let mut e = editor(b"\xffworld\n");
