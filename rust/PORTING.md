@@ -184,12 +184,14 @@ function mappings and syntax styles are now implemented; see
 API gaps. Stable logical selection identities and per-window last-visual marks
 now survive focus and undo. Real modal prompt windows, mixed editable history
 and recursive aliases are also implemented. Still incomplete: option bindings
-beyond the fixture corpus, some pending-operator combinations and custom
-wrapping. The visual mode key table, visual put over an empty register and
+beyond the fixture corpus and some pending-operator combinations. The visual
+mode key table, visual put over an empty register and
 linewise yank now follow the native editor (see the visual mode checkpoint
 below); paste dot-repeat matches the native editor in the key differential;
-and `:earlier`/`:later` now display the selected revision's local state time
-(see the history notification checkpoint below). Default build/install/
+`:earlier`/`:later` now display the selected revision's local state time
+(see the history notification checkpoint below); and the native `breakat`
+and `wrapcolumn` wrapping now matches the C coordinate oracle (see the
+custom wrapping checkpoint below). Default build/install/
 packaging migration and remaining helper integration are pending. Core piece
 lookup/editing is linear in piece count; UI frames still flatten buffers and
 repaint visible cells. Existing C builds remain the default.
@@ -199,10 +201,12 @@ bindings, with literal insert/replace input and unmodified replay semantics.
 Fourteen C/Rust PTY cases verify the mapping, pending literal arguments, truncated
 mapping pairs, modifiers and duplicate definitions.
 
-The renderer now implements default soft wrapping and configured tab stops,
-including narrow panes and visible EOF cursors. Its C-coordinate differential
-separately reports 1,111 known C EOF/tab-coordinate discrepancies, never counting
-them as equal. This is not a claim of complete view parity.
+The renderer implements default soft wrapping, configured tab stops,
+native `breakat`/`wrapcolumn` wrapping, narrow panes and visible EOF cursors.
+Its C-coordinate differential now drives custom break characters and wrap
+columns as well, separately reports 1,111 known C EOF/tab-coordinate
+discrepancies, and never counts them as equal. This is not a claim of complete
+view parity.
 
 `vis-digraph-rs` includes the complete 1,894-entry original table and preserves
 lookup order, output and exit codes. Piped input/listing are dependency-free;
@@ -602,3 +606,36 @@ all-feature/all-target suite reports 431 passed/1 ignored, the
 standard-library-only suite 302 passed, strict all-feature Clippy and
 formatting pass. Remaining pending-operator combinations are still
 open; these bounded corpora do not establish full modal parity.
+
+## Custom wrapping checkpoint (2026-10-26, macOS arm64)
+
+The coordinate model now distinguishes the physical view width from the
+effective text wrap width. C wraps source cells and the EOF cursor against
+`view_max_text_width` (the smaller of the window width and `wrapcolumn`) but
+reports end-of-text through the physical line table, so the two widths can
+differ on the final row. `walk_cells_with_layout` streams cells with both
+widths, places the EOF cell through the same breakat wrapping path as source
+cells, and backs layout-aware row, line-number, screen-position and last-row
+helpers.
+
+The renderer, hardware cursor, overlay cursors, match-bracket highlights and
+line-number sidebar use the layout-aware walker, so a `wrapcolumn` narrower
+than the window no longer draws rows or cursors at the wrong width. Per-window
+`wrapcolumn` travels with the published viewport metrics and is refreshed when
+`:set` changes the option, so screen-line, window-line, scroll and view-anchor
+motions measure the rows the user actually sees. Window options with no
+viewport use the full body width, matching native defaults.
+
+Verification: the C/Rust coordinate differential passes `breakat` and
+`wrapcolumn` into both drivers and includes end-of-text positions. Five custom
+cases cover hyphen/slash, colon/comma, underscore and wide-character breaks and
+a multi-line input at three widths and two tab stops. The corpus reports 20,804
+equal values, the same 1,111 documented C EOF/tab quirks and zero unknown
+differences. A focused `view` unit test pins the reflowed EOF coordinates and a
+terminal panel test pins the hardware cursor under `wrapcolumn`. The
+all-feature/all-target suite passes (320 lib tests, all target suites), the
+standard-library-only suite passes, strict all-target Clippy passes in both
+feature configurations, formatting passes, the default key sweep stays 23/0 and
+the native-action differential stays 118/0. Known limits remain: the corpus is
+bounded, C locale width rules differ from the generated Unicode tables, and UI
+frames still repaint visible cells.
