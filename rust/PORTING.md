@@ -639,3 +639,31 @@ feature configurations, formatting passes, the default key sweep stays 23/0 and
 the native-action differential stays 118/0. Known limits remain: the corpus is
 bounded, C locale width rules differ from the generated Unicode tables, and UI
 frames still repaint visible cells.
+
+## Native motion range checkpoint (2026-10-26, macOS arm64)
+
+Three native motion rules now match the C editor. The `%` motion first tries
+the bracket or quote under the cursor and otherwise scans forward for the
+first bracket-like character, so `d%` before any bracket deletes through the
+next bracket instead of doing nothing. Linewise operator ranges follow
+`text_range_linewise`: the start moves to the line begin, the end only moves
+past a line begin, and `LINEWISE_INCLUSIVE` motions (`j`, `k` and `G` without
+a count) first extend the end by one character. Counted `G` is the plain line
+motion, so `d3G` keeps its target line while `dG` deletes through EOF.
+Paragraph motions `{`/`}` are linewise, so `c{` at the start of the text
+inserts the native newline before the typed text. A missing text object leaves
+the accumulated range (empty at the cursor for the first iteration) for the
+operator instead of failing, so `ci(` and `ci"` enter insert mode at the
+cursor like native `vis_do`.
+
+Verification: a generated 1,200-case matrix crosses four buffers with five
+operators, eighteen motions, three counts and ten text objects; it matches the
+C oracle byte-for-byte and by before/after-Escape state (0 failures, 0
+unsupported). Five permanent differential built-ins and an editor contract
+test pin the new cases. The core key sweep passes 28/0, the Lua sweep 122/0
+with one upstream-disabled exclusion, the native-action differential 118/0,
+the view-coordinate differential 20,804 equal values with its documented C
+quirks and no unknown differences. The all-feature suite passes 322 lib tests
+plus every target suite, the standard-library-only suite passes, strict
+all-target Clippy and formatting pass. The generated matrix is bounded and
+does not cover every operator/motion/count combination.
