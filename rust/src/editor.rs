@@ -7647,6 +7647,33 @@ mod tests {
     }
 
     #[test]
+    fn native_linewise_motion_ranges_and_missing_objects_match_c() {
+        // Counted G is the non-inclusive line motion: the target line stays.
+        let mut e = editor(b"one\ntwo\nthree\nfour\n");
+        keys(&mut e, "d3G");
+        assert_eq!(e.text.to_vec(), b"three\nfour\n");
+        // G without a count is FILE_END and is linewise inclusive.
+        let mut e = editor(b"one\ntwo\nthree\n");
+        keys(&mut e, "dG");
+        assert_eq!(e.text.to_vec(), b"");
+        // Paragraph motions are linewise, so an empty change inserts one
+        // newline before the entered text.
+        let mut e = editor(b"one two three\nfour five\nsix\n");
+        keys(&mut e, "c{X");
+        escape(&mut e);
+        assert_eq!(e.text.to_vec(), b"X\none two three\nfour five\nsix\n");
+        // A missing text object leaves an empty range for the operator.
+        let mut e = editor(b"one two\n");
+        keys(&mut e, "ci(X");
+        escape(&mut e);
+        assert_eq!(e.text.to_vec(), b"Xone two\n");
+        // % without a bracket under the cursor scans forward like native.
+        let mut e = editor(b"alpha.beta, gamma_delta (x) [y] {z}\n");
+        keys(&mut e, "d%");
+        assert_eq!(e.text.to_vec(), b"x) [y] {z}\n");
+    }
+
+    #[test]
     fn visual_line_entry_consumes_count_and_escape_resets_charwise_count() {
         let mut e = editor(b"one two three\nfour five\nsix\n");
         keys(&mut e, "2Vj");

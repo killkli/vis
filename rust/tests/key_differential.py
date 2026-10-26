@@ -59,6 +59,11 @@ BUILTINS = [
     ("counted-visual-line-motion", b"one two three\nfour five\nsix\n", "2Vj"),
     ("counted-visual-char-escape", b"one two\n", "2v"),
     ("named-yank-does-not-replace-unnamed", b"one two three\nfour five\nsix\n", "\"ayyjVjP."),
+    ("counted-goto-keeps-target-line", b"one\ntwo\nthree\nfour\n", "d3G"),
+    ("file-end-linewise-inclusive", b"one\ntwo\nthree\n", "dG"),
+    ("paragraph-change-inserts-newline", b"one two three\nfour five\nsix\n", "c{X<Escape>"),
+    ("missing-textobject-still-changes", b"one two\n", "ci(X<Escape>"),
+    ("percent-scans-forward", b"alpha.beta, gamma_delta (x) [y] {z}\n", "d%"),
 ]
 
 DEFAULT_FIXTURES = [
