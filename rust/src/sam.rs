@@ -3640,8 +3640,13 @@ fn execute_commands(
         removed += edit.range.len();
         added += edit.bytes.len();
     }
-    if shell.interrupted() {
-        return Err(SamError::new(0, "command cancelled"));
+    if diagnostic.is_none() && shell.interrupted() {
+        let error = SamError::new(0, "command cancelled");
+        if accept_diagnostics {
+            diagnostic = Some(error.message);
+        } else {
+            return Err(error);
+        }
     }
     if !evaluator.edits.is_empty() {
         text.snapshot();
@@ -4886,7 +4891,7 @@ mod tests {
     }
 
     #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
-    fn assert_shell_cancellation(script: &str, input: &[u8]) {
+    fn assert_shell_cancellation(script: &str, input: &[u8], expected: &[u8]) {
         use std::time::{Duration, Instant};
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         struct Cleanup(PathBuf);
@@ -4925,19 +4930,20 @@ mod tests {
             ready.exists()
         });
         let started = Instant::now();
-        let error = session.execute(&mut text, script, 0..len).unwrap_err();
+        let execution = session.execute(&mut text, script, 0..len).unwrap();
+        let error = execution.diagnostic.expect("cancellation diagnostic");
         assert!(
             trigger.join().unwrap(),
             "shell never reached its readiness checkpoint"
         );
-        assert!(error.message.contains("cancelled"), "{error}");
+        assert!(error.contains("cancelled"), "{error}");
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "cancellation took {:?}",
             started.elapsed()
         );
-        assert_eq!(text.to_vec(), input);
-        assert_eq!(text.undo(), None);
+        assert_eq!(text.to_vec(), expected);
+        assert_eq!(text.undo().is_some(), expected != input);
         {
             let groups = groups.lock().unwrap();
             assert_eq!(groups.len(), 2);
@@ -5158,10 +5164,11 @@ mod tests {
 
     #[test]
     #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
-    fn cancel_shell_pipeline_transactionally_and_resume() {
+    fn cancel_shell_pipeline_and_resume() {
         assert_shell_cancellation(
             "0i/queued/\n,| printf ready > ready; sleep 20 | cat\n",
             b"original",
+            b"queuedoriginal",
         );
     }
 
@@ -5170,6 +5177,7 @@ mod tests {
     fn cancel_shell_descendants_which_ignore_term() {
         assert_shell_cancellation(
             ",| trap '' TERM; (trap '' TERM; printf ready > ready; sleep 20) & wait\n",
+            b"original",
             b"original",
         );
     }
@@ -5180,16 +5188,15 @@ mod tests {
         assert_shell_cancellation(
             ",| (sleep 0.05; printf ready > ready; sleep 20) & exit 0\n",
             b"original",
+            b"original",
         );
     }
 
     #[test]
     #[cfg(all(unix, any(feature = "terminal", feature = "lua")))]
     fn cancel_shell_with_blocked_large_pipe_input() {
-        assert_shell_cancellation(
-            ",| printf ready > ready; sleep 20\n",
-            &vec![b'x'; 4 * 1024 * 1024],
-        );
+        let input = vec![b'x'; 4 * 1024 * 1024];
+        assert_shell_cancellation(",| printf ready > ready; sleep 20\n", &input, &input);
     }
 
     #[test]
@@ -5197,6 +5204,7 @@ mod tests {
     fn cancel_shell_while_draining_large_output_and_errors() {
         assert_shell_cancellation(
             ",| printf ready > ready; while :; do printf '0123456789012345678901234567890123456789'; printf error >&2; done\n",
+            b"original",
             b"original",
         );
     }

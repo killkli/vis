@@ -7103,6 +7103,9 @@ impl Editor {
         self.sync_sam_registers();
         let execution = match result {
             Ok(execution) => execution,
+            Err(error) if compatible && error.is_evaluation() => {
+                return Ok(EditorAction::Message(error.to_string()));
+            }
             Err(error) => return Err(EditorError(error.to_string())),
         };
         let diagnostic = execution.diagnostic.clone();

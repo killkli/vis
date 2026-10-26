@@ -729,7 +729,9 @@ from command-level failures, matching `vis:command`. A failing shell command,
 file read, invalid mark or invalid address stops the explicit group, keeps every
 transcript effect queued before it and returns accepted status with a message;
 an execution carries that diagnostic so the editor can display it after applying
-the changes. Conflicts and parse errors remain atomic and return an error.
+the changes. An interrupted shell keeps its specific `shell command cancelled`
+diagnostic instead of being replaced by the generic pre-commit cancellation
+check. Conflicts and parse errors remain atomic and return an error.
 
 The strict Rust host API keeps its previous contract: `Workspace::command`,
 `Editor::execute_command` and the strict Sam mode reject evaluation errors
