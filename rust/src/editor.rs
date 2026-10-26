@@ -3292,7 +3292,7 @@ impl Editor {
             self.sync_primary_to_set()?;
             return result;
         }
-        if self.is_visual() && matches!(key, Key::Escape | Key::Ctrl('[')) {
+        if self.is_visual() && matches!(key, Key::Escape | Key::Ctrl('[')) && self.count.is_none() {
             self.window_selection_save()?;
         }
         let register_prefix = matches!(self.pending, Pending::Register);
@@ -3445,6 +3445,9 @@ impl Editor {
             return self.insert_key(key);
         }
         if matches!(key, Key::Escape | Key::Ctrl('[')) {
+            if self.is_visual() && self.count.take().is_some() {
+                return Ok(EditorAction::Continue);
+            }
             if matches!(self.pending, Pending::ReplaceChar) && self.is_visual() {
                 self.pending = Pending::None;
                 self.count = None;
@@ -3985,6 +3988,11 @@ impl Editor {
                 if self.mode == mode {
                     self.mode = Mode::Normal;
                 } else {
+                    // Native visual-line entry runs a no-op motion that
+                    // consumes the pending count before the next key.
+                    if mode == Mode::VisualLine {
+                        self.count = None;
+                    }
                     if !self.is_visual() {
                         self.anchor = self.cursor;
                     }
