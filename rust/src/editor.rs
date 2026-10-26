@@ -29,6 +29,12 @@ const MAX_REPEAT_KEYS: usize = 1_000_000;
 const MAX_INSERT_BYTES: usize = 64 * 1024 * 1024;
 const PROMPT_REGISTER: char = '\0';
 
+fn native_linewise_range(text: &Text, range: &Range<usize>) -> bool {
+    range.start < range.end
+        && (range.start == 0 || text.byte(range.start - 1) == Some(b'\n'))
+        && text.byte(range.end - 1) == Some(b'\n')
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Key {
     Char(char),
@@ -4696,12 +4702,45 @@ impl Editor {
             Register { bytes, linewise }
         };
         self.registers.insert(name, register.clone());
-        if !self.internal_scope {
-            self.registers.insert('"', register.clone());
-        }
         if !self.internal_scope && yank && name == '"' {
             self.registers.insert('0', register);
         }
+    }
+
+    /// Insert the newline used by native `op_change` for a linewise range.
+    fn insert_change_newline(&mut self, mut pos: usize) -> Result<usize, EditorError> {
+        let eof = pos == self.text.len();
+        let second_newline = eof && (pos == 0 || self.text.byte(pos - 1) != Some(b'\n'));
+        let mut indent = Vec::new();
+        let mut indent_len = 0;
+        if self.auto_indent {
+            let data = self.text.to_vec();
+            let begin = motion::line_begin(&data, pos);
+            let mut start = motion::line_start(&data, begin);
+            let end = motion::line_end(&data, start);
+            if start > pos {
+                start = pos;
+            }
+            indent_len = start.saturating_sub(begin);
+            if start == end {
+                pos = begin;
+            } else {
+                indent.extend_from_slice(&data[begin..begin + indent_len]);
+            }
+        }
+        self.text.insert(pos, b"\n")?;
+        if eof {
+            if second_newline {
+                self.text.insert(self.text.len(), b"\n")?;
+            } else {
+                pos = pos.saturating_sub(1);
+            }
+        }
+        pos += 1;
+        if !indent.is_empty() {
+            self.text.insert(pos, &indent)?;
+        }
+        Ok(pos + indent_len)
     }
 
     fn apply_operator(
@@ -4728,6 +4767,8 @@ impl Editor {
         self.operator_count = 1;
         self.count = None;
         let was_visual = self.is_visual();
+        let change_linewise =
+            matches!(operator, Operator::Change) && native_linewise_range(&self.text, &range);
         self.mode = Mode::Normal;
         match operator {
             Operator::Yank => {
@@ -4755,8 +4796,14 @@ impl Editor {
                 self.cursor = range.start.min(self.text.len());
                 self.recording_change = true;
                 if matches!(operator, Operator::Change) {
-                    if linewise {
-                        self.text.insert(self.cursor, b"\n")?;
+                    if linewise || change_linewise {
+                        let original_position = self.cursor;
+                        let newline_position =
+                            original_position.saturating_sub(usize::from(original_position > 0));
+                        let new_cursor = self.insert_change_newline(newline_position)?;
+                        if original_position > 0 {
+                            self.cursor = new_cursor;
+                        }
                         self.recording_change = true;
                     }
                     self.enter_insert(false, 1);
@@ -4823,9 +4870,6 @@ impl Editor {
             }
         }
         self.register_slots.insert(key, slots.clone());
-        if !self.internal_scope {
-            self.register_slots.insert('"', slots.clone());
-        }
         if !self.internal_scope && yank && name == '"' {
             self.register_slots.insert('0', slots);
         }
@@ -4889,9 +4933,11 @@ impl Editor {
                 let edits = ranges
                     .into_iter()
                     .map(|range| {
+                        let change_linewise =
+                            change && (linewise || native_linewise_range(&self.text, &range));
                         (
                             range,
-                            if change && linewise {
+                            if change_linewise {
                                 vec![b'\n']
                             } else {
                                 Vec::new()
