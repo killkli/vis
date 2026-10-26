@@ -2319,7 +2319,7 @@ impl Inner {
             .or_else(|| builtin_option_kind(name));
         let Some(kind) = kind else { return Ok(None) };
         let text = words.get(1).map(String::as_str);
-        if toggle && (text.is_some() || kind != OptionKind::Bool) {
+        if toggle && (text.is_some() || !matches!(kind, OptionKind::Bool)) {
             return Ok(Some(false));
         }
         let value = match kind {
