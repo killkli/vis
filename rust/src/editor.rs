@@ -575,6 +575,10 @@ pub struct Editor {
     /// Native `ignorecase` option: the search ignores the case of the ASCII
     /// letters.
     ignorecase: bool,
+    /// Native `loadmethod` option: how a file is read.
+    loadmethod: Option<String>,
+    /// Native `change256colors` option: use the alternative 256 color palette.
+    change256colors: bool,
     /// Native `view->start_mark`: the first displayed row is tracked by a text
     /// mark, so edits above the view keep the visible content in place.
     view_anchor: Option<crate::text::Mark>,
@@ -677,6 +681,8 @@ impl Editor {
             view_anchor: None,
             escape_delay: None,
             ignorecase: false,
+            loadmethod: None,
+            change256colors: false,
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -2458,6 +2464,25 @@ impl Editor {
     /// regardless of case.
     pub fn set_ignorecase(&mut self, ignorecase: bool) {
         self.ignorecase = ignorecase;
+    }
+
+    /// Native `loadmethod` option: how a file is read.
+    pub fn set_loadmethod(&mut self, loadmethod: Option<String>) {
+        self.loadmethod = loadmethod;
+    }
+
+    pub fn loadmethod(&self) -> Option<String> {
+        self.loadmethod.clone()
+    }
+
+    /// Native `change256colors` option: use the alternative 256 color
+    /// palette.
+    pub fn set_change256colors(&mut self, change256colors: bool) {
+        self.change256colors = change256colors;
+    }
+
+    pub fn change256colors(&self) -> bool {
+        self.change256colors
     }
 
     pub fn ignorecase(&self) -> bool {
@@ -6558,6 +6583,21 @@ impl Editor {
                             "noexpandtab" | "noet" => self.expand_tab = false,
                             "ignorecase" | "ic" => self.ignorecase = boolean(inline.as_deref())?,
                             "noignorecase" | "noic" => self.ignorecase = false,
+                            "change256colors" => {
+                                self.change256colors = boolean(inline.as_deref())?
+                            }
+                            "loadmethod" => {
+                                let method = match inline {
+                                    Some(value) => value,
+                                    None => tokens
+                                        .next()
+                                        .ok_or_else(|| {
+                                            EditorError("Expecting string option value".into())
+                                        })?
+                                        .to_string(),
+                                };
+                                self.set_loadmethod(Some(method));
+                            }
                             "autoindent" | "ai" => self.auto_indent = boolean(inline.as_deref())?,
                             "noautoindent" | "noai" => self.auto_indent = false,
                             "tabwidth" | "tw" => {

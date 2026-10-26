@@ -35,6 +35,15 @@ fn the_escape_delay_option_is_reported_in_milliseconds() {
 }
 
 #[test]
+fn the_load_method_and_color_options_are_accepted() {
+    let mut ws = workspace();
+    command(&mut ws, ":set loadmethod raw");
+    assert_eq!(ws.editor.loadmethod().as_deref(), Some("raw"));
+    command(&mut ws, ":set change256colors on");
+    assert!(ws.editor.change256colors(), "change256colors");
+}
+
+#[test]
 fn the_ignorecase_option_makes_the_search_case_insensitive() {
     let mut ws = Workspace::new(&[], Some(b"Hello World\n".to_vec()), false).unwrap();
     // Without the option the search is case sensitive and finds nothing.

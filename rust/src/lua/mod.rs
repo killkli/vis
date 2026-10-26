@@ -728,9 +728,8 @@ impl Inner {
             return Some(OptionScope::Global);
         }
         match name {
-            "autoindent" | "ai" | "shell" | "escdelay" | "ignorecase" | "ic" => {
-                Some(OptionScope::Global)
-            }
+            "autoindent" | "ai" | "shell" | "escdelay" | "ignorecase" | "ic"
+            | "loadmethod" | "change256colors" => Some(OptionScope::Global),
             "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof"
             | "numbers" | "nu" | "relativenumbers" | "rnu" | "numberwidth" | "nuw"
             | "cursorline" | "cul" | "colorcolumn" | "cc" | "showspaces" | "showtabs"
@@ -785,6 +784,15 @@ impl Inner {
                     "ignorecase" | "ic" => {
                         Ok(Value::Boolean(self.workspace.borrow().editor.ignorecase()))
                     }
+                    "change256colors" => Ok(Value::Boolean(
+                        self.workspace.borrow().editor.change256colors(),
+                    )),
+                    "loadmethod" => match self.workspace.borrow().editor.loadmethod() {
+                        Some(method) => Ok(Value::String(
+                            self.lua.create_string(method)?,
+                        )),
+                        None => Ok(Value::Nil),
+                    },
                     "shell" => {
                         let shell = self.workspace.borrow().editor.shell();
                         Ok(Value::String(self.lua.create_string(shell)?))
@@ -897,6 +905,21 @@ impl Inner {
                     let current = ws.editor.ignorecase();
                     let enabled = if toggle { !current } else { truth(&value) };
                     ws.editor.set_ignorecase(enabled);
+                    return Ok(true);
+                }
+                "change256colors" => {
+                    let current = ws.editor.change256colors();
+                    let enabled = if toggle { !current } else { truth(&value) };
+                    ws.editor.set_change256colors(enabled);
+                    return Ok(true);
+                }
+                "loadmethod" => {
+                    let method = match value {
+                        Value::String(method) => Some(method.to_str()?.to_string()),
+                        Value::Nil => None,
+                        _ => return Err(mlua::Error::runtime("expected load method name")),
+                    };
+                    ws.editor.set_loadmethod(method);
                     return Ok(true);
                 }
                 "shell" => {
@@ -3525,7 +3548,8 @@ fn builtin_option_kind(name: &str) -> Option<OptionKind> {
         "tabwidth" | "tw" => Some(OptionKind::Number),
         "expandtab" | "et" | "autoindent" | "ai" | "oneline" | "statusbar" | "showeof"
         | "cursorline" | "cul" | "showspaces" | "showtabs" | "shownewlines" | "ignorecase"
-        | "ic" => Some(OptionKind::Bool),
+        | "ic" | "change256colors" => Some(OptionKind::Bool),
+        "loadmethod" => Some(OptionKind::String),
         "numberwidth" | "nuw" | "colorcolumn" | "cc" | "wrapcolumn" | "wc" => {
             Some(OptionKind::Number)
         }

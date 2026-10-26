@@ -117,6 +117,11 @@ regardless of case, like native `REG_ICASE` in the C locale. The named classes
 keep the case of the input, and the option reaches the search through the
 `:set` command and the Lua option API.
 
+The native `loadmethod` and `change256colors` options are accepted and
+reported as well. This port always reads a file as raw bytes, so both load
+methods behave the same here, and the alternative color palette is not
+implemented.
+
 The remaining native window options are accepted and reported:
 `cursorline`, `colorcolumn`, `showspaces`, `showtabs`, `shownewlines` and
 `wrapcolumn`. The `wrapcolumn` option wraps the text at the smaller of the
