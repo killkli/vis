@@ -3516,6 +3516,7 @@ impl Editor {
                     Key::Ctrl('y') => Some(NativeAction::WindowSlideDown),
                     _ => None,
                 };
+                self.pending = Pending::None;
                 let Some(action) = action else {
                     return Err(EditorError("unknown insert window command".into()));
                 };
@@ -5240,6 +5241,7 @@ impl Editor {
                     Key::Ctrl('y') => Some(NativeAction::WindowSlideDown),
                     _ => None,
                 };
+                self.pending = Pending::None;
                 let Some(action) = action else {
                     return Err(EditorError("unknown insert window command".into()));
                 };

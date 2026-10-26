@@ -65,6 +65,7 @@ BUILTINS = [
     ("missing-textobject-still-changes", b"one two\n", "ci(X<Escape>"),
     ("punctuation-word-search", b'<div class="x">\n  <p>hello</p>\n</div>\n', "*dn"),
     ("punctuation-word-search-repeat", b'<div class="x">\n  <p>hello</p>\n</div>\n', "*n"),
+    ("insert-window-slide", b"one two three\nfour five\n", "i<C-x><C-e>X<Escape>"),
     ("percent-scans-forward", b"alpha.beta, gamma_delta (x) [y] {z}\n", "d%"),
 ]
 
