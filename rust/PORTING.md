@@ -575,3 +575,30 @@ message from C vis and vis-rs after `:earlier`. An editor-level
 contract test checks both `:earlier` and `:later` messages against the
 selected revision. This does not provide Windows local-zone lookup
 when `TZ` is unset; that environment falls back to UTC.
+
+## Pending operator edge checkpoint (2026-10-26, macOS arm64)
+
+Six additional C-observable pending-action edges now match. A `;` or
+`,` with no prior character search is consumed without cancelling a
+pending `d`/`c`/`y`, so the following motion still completes the
+operator. A `c` whose resulting half-open range is linewise is treated
+linewise even when the motion itself is charwise; newline insertion
+matches native `vis_text_insert_nl`, including its two-newline EOF
+case. Entering visual-line mode consumes the existing count before the
+next motion, while Escape with a pending count clears only the count and
+leaves characterwise visual mode active. Visual puts record the native
+put action for dot-repeat rather than replaying the preceding visual
+selection, and explicit named yanks no longer overwrite the unnamed
+register. Counted empty-register `2VjP.` deletes the selected lines once
+and leaves the remaining line intact on repeat.
+
+Verification: an 80-case generated pending-operator/visual-count matrix
+and a separate 35-case register/put/escape matrix match the C oracle
+byte-for-byte. Six permanent differential built-ins and four editor unit
+tests protect the new cases. Full key sweeps report 114 pass/4 explicit
+core exclusions and 117 pass/1 upstream-disabled Lua exclusion; the
+native-action differential reports 118 pass/0 unsupported. The final
+all-feature/all-target suite reports 431 passed/1 ignored, the
+standard-library-only suite 302 passed, strict all-feature Clippy and
+formatting pass. Remaining pending-operator combinations are still
+open; these bounded corpora do not establish full modal parity.
