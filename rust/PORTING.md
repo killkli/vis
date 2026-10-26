@@ -667,3 +667,46 @@ quirks and no unknown differences. The all-feature suite passes 322 lib tests
 plus every target suite, the standard-library-only suite passes, strict
 all-target Clippy and formatting pass. The generated matrix is bounded and
 does not cover every operator/motion/count combination.
+
+## Operator and option semantics checkpoint (2026-10-26, macOS arm64)
+
+The operator-pending and selection paths now follow the native tables more
+closely. Normal and visual `M` restore the selection mark while the
+operator-pending table reaches the window-middle motion; bracket prefixes,
+`n`/`N` and `*`/`#` are available before operators. A `COUNT_EXACT` find or
+till motion that does not move drops the pending operator (change still opens
+insert mode at the cursor). Counted `G` and `gg` use the native line motion,
+which lands on the first non-blank and keeps a line-begin range end, while
+`gg` without a count is `FILE_BEGIN` and carries the inclusive flag. A single
+motion target under an operator uses the operator range path instead of the
+multi-selection batch path, matching the native linewise change at EOF.
+Selection algebra computes the native range list first: an empty result clears
+the remaining selection and its anchoring, and non-empty complements keep the
+range byte-for-byte.
+
+Insert mode also follows native put and readline rules: `<C-x><C-e>` and
+`<C-x><C-y>` clear their prefix after the slide action, and `<C-r>` inserts a
+linewise register at the line begin, appends a missing newline and repeats the
+register for the insert count. Word searches only build the native
+word-boundary expression for word-like objects, so punctuation searches leave
+the pattern and cursor alone. The replay observer now reports the actual
+anchored flag instead of the visual mode, which exposed and fixed the empty
+complement differences.
+
+The `:set` command accepts only the native grammar: one option name and at most
+one whitespace-separated value. There is no `name=value` form and no `no` name
+prefix; boolean options are disabled with a value or toggled with `!`. The same
+rule applies to window options, structural commands and Lua-registered options.
+
+Verification: a generated 732-case normal/visual operator matrix passes with
+zero failures, a 4,608-case register/object/operator/count matrix reports 4,248
+equal values with the 360 non-native `it`/`at` sequences excluded, and a
+4,992-case motion/operator/count matrix reports 4,896 equal values with the 96
+unbound `g^` sequences excluded. Insert and option matrices (54 and 32 cases),
+plus focused fixtures for punctuation searches, counted line motions, failed
+finds, insert registers, window slides and the `set` grammar, pass in the key
+differential. The key sweep passes 135/0 with four upstream-disabled
+exclusions; all-target tests, strict Clippy, formatting and the seven PTY view
+checks pass. The matrices are bounded; the native parser's redispatch of
+invalid key prefixes (for example `d[}`) and non-native text objects are not
+reproduced.
