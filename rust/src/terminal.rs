@@ -867,9 +867,10 @@ struct PanelFrame {
 
 /// Re-exported for compatibility: coordinate requests share the core layout.
 pub use crate::view::screen_position;
-use crate::view::{CellKind, screen_position_with_breakat, walk_cells, walk_cells_with_breakat};
+use crate::view::{CellKind, screen_position_with_layout, walk_cells, walk_cells_with_layout};
 
 /// Zero-based soft-wrapped coordinates for a cursor position.
+#[cfg(test)]
 fn wrapped_cursor(
     data: &[u8],
     cursor: usize,
@@ -877,7 +878,25 @@ fn wrapped_cursor(
     tab_width: usize,
     breakat: &str,
 ) -> (usize, usize) {
-    screen_position_with_breakat(data, cursor, columns.max(1), tab_width, breakat)
+    wrapped_cursor_with_layout(data, cursor, columns, columns, tab_width, breakat)
+}
+
+fn wrapped_cursor_with_layout(
+    data: &[u8],
+    cursor: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> (usize, usize) {
+    screen_position_with_layout(
+        data,
+        cursor,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+    )
 }
 
 #[cfg(test)]
@@ -904,9 +923,41 @@ fn wrapped_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn wrapped_rows_decorated(
     data: &[u8],
     columns: usize,
+    tab_width: usize,
+    visible: Range<usize>,
+    selections: &[Range<usize>],
+    decorations: Option<&ViewDecorations>,
+    show_eof: bool,
+    breakat: &str,
+    show_spaces: bool,
+    show_tabs: bool,
+    show_newlines: bool,
+) -> Vec<RenderedLine> {
+    wrapped_rows_decorated_with_layout(
+        data,
+        columns,
+        columns,
+        tab_width,
+        visible,
+        selections,
+        decorations,
+        show_eof,
+        breakat,
+        show_spaces,
+        show_tabs,
+        show_newlines,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wrapped_rows_decorated_with_layout(
+    data: &[u8],
+    physical_columns: usize,
+    wrap_columns: usize,
     tab_width: usize,
     visible: Range<usize>,
     selections: &[Range<usize>],
@@ -926,66 +977,73 @@ fn wrapped_rows_decorated(
     let mut selected = vec![false; lines.len()];
     let mut sequences = vec![String::new(); lines.len()];
     let mut eof_row = None;
-    walk_cells_with_breakat(data, columns, tab_width, breakat, |cell| {
-        if matches!(cell.kind, CellKind::Eof) {
-            eof_row = Some(cell.row);
-        }
-        if cell.row >= visible.end {
-            return false;
-        }
-        if cell.row < visible.start {
-            return true;
-        }
-        let index = cell.row - visible.start;
-        let line = &mut lines[index];
-        let highlight = selections.iter().any(|range| {
-            (cell.pos < range.end && cell.pos + cell.len > range.start)
-                || (range.is_empty()
-                    && (range.start == cell.pos
-                        || (cell.pos < range.start && range.start < cell.pos + cell.len)))
-        });
-        if let Some(styles) = decorations {
-            let mut style = resolved_style(Some(styles), 0);
-            for (id, range) in &styles.ranges {
-                // C advances to the first cell whose source position reaches
-                // start. A start inside a UTF-8 scalar skips that scalar; an
-                // inclusive end has already been converted by the Lua bridge.
-                let overlaps = range.contains(&cell.pos);
-                if overlaps {
+    walk_cells_with_layout(
+        data,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        |cell| {
+            if matches!(cell.kind, CellKind::Eof) {
+                eof_row = Some(cell.row);
+            }
+            if cell.row >= visible.end {
+                return false;
+            }
+            if cell.row < visible.start {
+                return true;
+            }
+            let index = cell.row - visible.start;
+            let line = &mut lines[index];
+            let highlight = selections.iter().any(|range| {
+                (cell.pos < range.end && cell.pos + cell.len > range.start)
+                    || (range.is_empty()
+                        && (range.start == cell.pos
+                            || (cell.pos < range.start && range.start < cell.pos + cell.len)))
+            });
+            if let Some(styles) = decorations {
+                let mut style = resolved_style(Some(styles), 0);
+                for (id, range) in &styles.ranges {
+                    // C advances to the first cell whose source position reaches
+                    // start. A start inside a UTF-8 scalar skips that scalar; an
+                    // inclusive end has already been converted by the Lua bridge.
+                    let overlaps = range.contains(&cell.pos);
+                    if overlaps {
+                        style = style.merge(resolved_style(Some(styles), *id));
+                    }
+                }
+                if let Some(id) = styles.cells.get(&(cell.column, index)) {
                     style = style.merge(resolved_style(Some(styles), *id));
                 }
+                if highlight {
+                    style = style.merge(resolved_style(Some(styles), 4));
+                }
+                let sequence = style.to_sgr();
+                if sequence != sequences[index] {
+                    line.text.push_str(&sequence);
+                    sequences[index] = sequence;
+                }
+                selected[index] = true;
+            } else if highlight != selected[index] {
+                line.text
+                    .push_str(if highlight { "\x1b[7m" } else { "\x1b[0m" });
+                selected[index] = highlight;
             }
-            if let Some(id) = styles.cells.get(&(cell.column, index)) {
-                style = style.merge(resolved_style(Some(styles), *id));
+            match cell.kind {
+                CellKind::Source => line
+                    .text
+                    .push_str(&display_token(data, cell.pos, cell.column).0),
+                CellKind::Replacement => line.text.push('?'),
+                CellKind::Space => line.text.push(if show_spaces { '·' } else { ' ' }),
+                CellKind::Tab => line.text.push(if show_tabs { '›' } else { ' ' }),
+                CellKind::TabFill => line.text.push(' '),
+                CellKind::Newline => line.text.push(if show_newlines { '↵' } else { ' ' }),
+                CellKind::Eof => line.text.push(' '),
             }
-            if highlight {
-                style = style.merge(resolved_style(Some(styles), 4));
-            }
-            let sequence = style.to_sgr();
-            if sequence != sequences[index] {
-                line.text.push_str(&sequence);
-                sequences[index] = sequence;
-            }
-            selected[index] = true;
-        } else if highlight != selected[index] {
-            line.text
-                .push_str(if highlight { "\x1b[7m" } else { "\x1b[0m" });
-            selected[index] = highlight;
-        }
-        match cell.kind {
-            CellKind::Source => line
-                .text
-                .push_str(&display_token(data, cell.pos, cell.column).0),
-            CellKind::Replacement => line.text.push('?'),
-            CellKind::Space => line.text.push(if show_spaces { '·' } else { ' ' }),
-            CellKind::Tab => line.text.push(if show_tabs { '›' } else { ' ' }),
-            CellKind::TabFill => line.text.push(' '),
-            CellKind::Newline => line.text.push(if show_newlines { '↵' } else { ' ' }),
-            CellKind::Eof => line.text.push(' '),
-        }
-        line.width += cell.width;
-        true
-    });
+            line.width += cell.width;
+            true
+        },
+    );
     for (index, line) in lines.iter_mut().enumerate() {
         if selected[index] {
             line.text.push_str("\x1b[0m");
@@ -1004,12 +1062,12 @@ fn wrapped_rows_decorated(
         if let Some(styles) = decorations {
             append_styled_padding(
                 &mut line.text,
-                line.width..columns,
+                line.width..physical_columns,
                 index,
                 resolved_style(decorations, 0),
                 styles,
             );
-            line.width = columns;
+            line.width = physical_columns;
             line.text.push_str("\x1b[0m");
         }
     }
@@ -1416,12 +1474,19 @@ impl Viewport {
         } else {
             text_columns
         };
-        let (cursor_row, cursor_column) =
-            wrapped_cursor(data, cursor, wrap_columns, tab_width, &display.breakat);
-        let cursor_line = crate::view::line_number_at_row_with_breakat(
+        let (cursor_row, cursor_column) = wrapped_cursor_with_layout(
+            data,
+            cursor,
+            text_columns,
+            wrap_columns,
+            tab_width,
+            &display.breakat,
+        );
+        let cursor_line = crate::view::line_number_at_row_with_layout(
             data,
             cursor_row,
             text_columns,
+            wrap_columns,
             tab_width,
             &display.breakat,
         )
@@ -1431,6 +1496,7 @@ impl Viewport {
             self.top,
             body,
             text_columns,
+            wrap_columns,
             tab_width,
             &display,
             cursor_line,
@@ -1439,7 +1505,13 @@ impl Viewport {
         if let Some(top) = requested_top {
             // Scroll actions place the cursor where the user will see it; do
             // not pull the view back, only clamp to the last row that exists.
-            self.top = top.min(crate::view::last_row(data, columns, tab_width));
+            self.top = top.min(crate::view::last_row_with_layout(
+                data,
+                text_columns,
+                wrap_columns,
+                tab_width,
+                &display.breakat,
+            ));
         } else {
             if cursor_row < self.top {
                 self.top = cursor_row;
@@ -1497,8 +1569,9 @@ impl Viewport {
             };
         }
         let mut frame = String::from("\x1b[0m");
-        let visible = wrapped_rows_decorated(
+        let visible = wrapped_rows_decorated_with_layout(
             data,
+            text_columns,
             wrap_columns,
             tab_width,
             self.top..self.top + body,
@@ -1722,89 +1795,96 @@ fn ordered_panel(
     let mut last_source = None;
     let mut source_position = 0;
     let mut visible_start = None;
-    walk_cells_with_breakat(data, wrap_width, tab_width, &display.breakat, |cell| {
-        let file_bytes = if last_source == Some(cell.pos) {
-            0
-        } else {
-            cell.len
-        };
-        last_source = Some(cell.pos);
-        if cell.row >= top {
-            visible_start.get_or_insert(source_position);
-        }
-        source_position += file_bytes;
-        if matches!(cell.kind, CellKind::Eof) {
-            eof_row = Some(cell.row);
-        }
-        if cell.row >= top + body_height {
-            return false;
-        }
-        if cell.row < top {
-            return true;
-        }
-        let row = cell.row - top;
-        if cell.width == 0 {
-            let mut column = cell.column.min(width);
-            while column > 0 {
-                column -= 1;
-                if body[row * text_width + column].width > 0 {
-                    body[row * width + column]
-                        .text
-                        .push_str(&display_token(data, cell.pos, cell.column).0);
-                    body[row * width + column].file_bytes += file_bytes;
-                    break;
-                }
+    walk_cells_with_layout(
+        data,
+        text_width,
+        wrap_width,
+        tab_width,
+        &display.breakat,
+        |cell| {
+            let file_bytes = if last_source == Some(cell.pos) {
+                0
+            } else {
+                cell.len
+            };
+            last_source = Some(cell.pos);
+            if cell.row >= top {
+                visible_start.get_or_insert(source_position);
             }
-            return true;
-        }
-        let token = match cell.kind {
-            CellKind::Source => display_token(data, cell.pos, cell.column).0,
-            CellKind::Replacement => "?".into(),
-            CellKind::Space => {
-                if show_spaces {
-                    "·".into()
-                } else {
-                    " ".into()
-                }
+            source_position += file_bytes;
+            if matches!(cell.kind, CellKind::Eof) {
+                eof_row = Some(cell.row);
             }
-            CellKind::Tab => {
-                if show_tabs {
-                    "›".into()
-                } else {
-                    " ".into()
-                }
+            if cell.row >= top + body_height {
+                return false;
             }
-            CellKind::TabFill => " ".into(),
-            CellKind::Newline => {
-                if show_newlines {
-                    "↵".into()
-                } else {
-                    " ".into()
-                }
+            if cell.row < top {
+                return true;
             }
-            CellKind::Eof => " ".into(),
-        };
-        let index = row * text_width + cell.column;
-        body[index].text = token;
-        body[index].width = cell.width;
-        body[index].source = Some(cell.pos);
-        if data
-            .get(cell.pos)
-            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
-        {
-            body[index].style = base.merge(whitespace);
-        }
-        body[index].file_bytes = file_bytes;
-        body[index].in_line = !matches!(cell.kind, CellKind::Eof);
-        for offset in 1..cell.width {
-            body[index + offset].text.clear();
-            body[index + offset].width = 0;
-            body[index + offset].source = Some(cell.pos);
-            body[index + offset].style = body[index].style;
-            body[index + offset].in_line = true;
-        }
-        true
-    });
+            let row = cell.row - top;
+            if cell.width == 0 {
+                let mut column = cell.column.min(width);
+                while column > 0 {
+                    column -= 1;
+                    if body[row * text_width + column].width > 0 {
+                        body[row * width + column]
+                            .text
+                            .push_str(&display_token(data, cell.pos, cell.column).0);
+                        body[row * width + column].file_bytes += file_bytes;
+                        break;
+                    }
+                }
+                return true;
+            }
+            let token = match cell.kind {
+                CellKind::Source => display_token(data, cell.pos, cell.column).0,
+                CellKind::Replacement => "?".into(),
+                CellKind::Space => {
+                    if show_spaces {
+                        "·".into()
+                    } else {
+                        " ".into()
+                    }
+                }
+                CellKind::Tab => {
+                    if show_tabs {
+                        "›".into()
+                    } else {
+                        " ".into()
+                    }
+                }
+                CellKind::TabFill => " ".into(),
+                CellKind::Newline => {
+                    if show_newlines {
+                        "↵".into()
+                    } else {
+                        " ".into()
+                    }
+                }
+                CellKind::Eof => " ".into(),
+            };
+            let index = row * text_width + cell.column;
+            body[index].text = token;
+            body[index].width = cell.width;
+            body[index].source = Some(cell.pos);
+            if data
+                .get(cell.pos)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+            {
+                body[index].style = base.merge(whitespace);
+            }
+            body[index].file_bytes = file_bytes;
+            body[index].in_line = !matches!(cell.kind, CellKind::Eof);
+            for offset in 1..cell.width {
+                body[index + offset].text.clear();
+                body[index + offset].width = 0;
+                body[index + offset].source = Some(cell.pos);
+                body[index + offset].style = body[index].style;
+                body[index + offset].in_line = true;
+            }
+            true
+        },
+    );
     if display.showeof {
         if let Some(eof) = eof_row {
             for row in 0..body_height {
@@ -1856,8 +1936,14 @@ fn ordered_panel(
                     .max()
                     .map_or(start, |position| motion::char_next(data, position));
                 for (position, is_primary) in &overlay.cursors {
-                    let (row, column) =
-                        wrapped_cursor(data, *position, text_width, tab_width, &display.breakat);
+                    let (row, column) = wrapped_cursor_with_layout(
+                        data,
+                        *position,
+                        text_width,
+                        wrap_width,
+                        tab_width,
+                        &display.breakat,
+                    );
                     if row >= top && row < top + body_height && column < text_width {
                         let cell = &mut body[(row - top) * text_width + column];
                         cell.style = cell
@@ -1869,10 +1955,11 @@ fn ordered_panel(
                             motion::bracket_match_range(data, *position, start..end)
                                 .filter(|matching| matching != position)
                         {
-                            let (row, column) = wrapped_cursor(
+                            let (row, column) = wrapped_cursor_with_layout(
                                 data,
                                 matching,
                                 text_width,
+                                wrap_width,
                                 tab_width,
                                 &display.breakat,
                             );
@@ -1975,11 +2062,23 @@ fn sidebar_columns(
     if !display.numbers && !display.relativenumbers {
         return 0;
     }
+    let wrap_columns = if display.wrapcolumn > 0 {
+        display.wrapcolumn.min(columns)
+    } else {
+        columns
+    };
     let last = if body == 0 {
         1
     } else {
-        crate::view::line_number_at_row_with_breakat(data, top + body - 1, columns, tab_width, "")
-            .unwrap_or(1)
+        crate::view::line_number_at_row_with_layout(
+            data,
+            top + body - 1,
+            columns,
+            wrap_columns,
+            tab_width,
+            &display.breakat,
+        )
+        .unwrap_or(1)
     };
     (last.to_string().len() + 1)
         .max(display.numberwidth)
@@ -1992,7 +2091,8 @@ fn line_numbers(
     data: &[u8],
     top: usize,
     body: usize,
-    columns: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
     tab_width: usize,
     display: &WindowDisplay,
     cursor_line: usize,
@@ -2001,8 +2101,14 @@ fn line_numbers(
     if width == 0 {
         return LineNumbers::none();
     }
-    let lines =
-        crate::view::row_line_numbers_with_breakat(data, top..top + body, columns, tab_width, "");
+    let lines = crate::view::row_line_numbers_with_layout(
+        data,
+        top..top + body,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        &display.breakat,
+    );
     let numbers = lines
         .into_iter()
         .map(|line| {
@@ -2974,6 +3080,41 @@ mod tests {
         // Native `view_max_text_width` wraps the text at the column.
         assert!(panel.text.contains("abcdefghij"), "{:?}", panel.text);
         assert!(panel.text.contains("klmnopqrst"), "{:?}", panel.text);
+    }
+
+    #[test]
+    fn wrapcolumn_eof_cursor_matches_the_c_view_oracle() {
+        // The C oracle reports end of text at row 3, column 5 for this input
+        // (width 40, wrapcolumn 5); the hardware cursor follows it.
+        let data = b"aa bb-cc/dd ee";
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 8,
+        };
+        let mut viewport = Viewport::default();
+        let display = WindowDisplay {
+            wrapcolumn: 5,
+            breakat: std::sync::Arc::from(" -/"),
+            ..WindowDisplay::default()
+        };
+        let panel = viewport.panel_decorated(
+            data,
+            14,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            None,
+            display,
+            &OverlayContext::default(),
+            None,
+            None,
+        );
+        assert_eq!(panel.cursor, (4, 6));
     }
 
     #[test]
