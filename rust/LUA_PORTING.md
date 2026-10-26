@@ -10,12 +10,17 @@ original `test/lua` / `test/vis` fixtures.
 
 `mlua 0.11.6` supports the crate's Rust 1.85 minimum and Lua 5.5. The interpreter
 loads only the safe standard libraries (`Lua::new_with(StdLib::ALL_SAFE, …)`,
-the same set as `Lua::new()`): arbitrary C-module loading, `package.loadlib`,
-and the `debug`/`ffi` libraries remain unavailable. mlua refuses to open `debug`
-from its safe constructor, and the unsafe constructor the crate forbids is the
-only alternative, so configuration that calls `debug.getinfo` (for example the
-vis-lspc plugin) fails at load time. The global stays nil, which
-`unsafe_libraries_stay_unavailable_to_configuration` pins.
+the same set as `Lua::new()`): arbitrary C-module loading, `package.loadlib`
+and the `ffi` library remain unavailable. mlua refuses to open `debug` from its
+safe constructor, and the unsafe constructor the crate forbids is the only
+alternative. The runtime therefore installs a curated `debug` table instead of
+the native one: `debug.getinfo` and `debug.traceback` are served by the
+interpreter's own stack inspection through mlua's safe `inspect_stack` and
+`traceback` calls, so configuration that reports its own source location (for
+example the vis-lspc plugin) keeps working. The remaining `debug` members stay
+absent, and `ffi` and C module loading stay unavailable, which
+`unsafe_libraries_stay_unavailable_to_configuration` and
+`the_curated_debug_library_reports_source_locations` pin.
 The vendored Lua VM and mlua dependencies contain native/unsafe implementation;
 our Rust code continues to forbid unsafe code. `--no-default-features` still has
 zero Cargo dependencies; `--features lua` explicitly opts into the interpreter.
@@ -126,10 +131,12 @@ foreground/canonical terminal protocol. Verify startup geometry, persistent redr
 styles, remaining automatic option overlays, file-name mutations and argument/error semantics
 against C. Passing the original eight Lua scripts is not complete API coverage.
 
-The `debug` library stays outside the safe boundary. Making common plugin uses
-work needs either a safe mlua debug surface or a curated Lua-side replacement
-for `debug.getinfo`/`traceback`; until then such plugins are rejected rather
-than silently misbehaving.
+The native `debug` library stays outside the safe boundary. The curated
+`debug.getinfo`/`debug.traceback` subset covers the common plugin uses; the
+remaining members (hooks, local and upvalue access) are absent, so a plugin
+that needs them is rejected with an explicit error rather than silently
+misbehaving. `debug.getinfo` with a function argument is not served, because
+the safe surface cannot locate a function in the call stack.
 
 The safe supervisor explicitly returns Unsupported on targets whose available
 safe OS interface cannot reserve an exited leader (`WNOWAIT` unavailable). That

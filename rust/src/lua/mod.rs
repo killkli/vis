@@ -94,6 +94,102 @@ pub(crate) struct Inner {
     processes: RefCell<process::Manager>,
 }
 
+/// Native vis opens the whole `debug` library. This port keeps the unsafe
+/// libraries closed and installs a curated subset instead: `debug.getinfo` and
+/// `debug.traceback` are served by the interpreter's own stack inspection, so
+/// configuration that reports its own source location keeps working.
+fn install_debug_library(lua: &Lua) -> Result<()> {
+    let table = lua.create_table()?;
+    let getinfo = lua.create_function(|lua, (level, what): (Value, Option<String>)| {
+        let level = match level {
+            Value::Integer(number) if number >= 0 => number as usize,
+            _ => return Ok(Value::Nil),
+        };
+        let what = what.unwrap_or_else(|| "flnStu".to_string());
+        let Some(frames) = lua.inspect_stack(level, |debug| {
+            let source = debug.source();
+            let names = debug.names();
+            (
+                source.source.map(|value| value.into_owned()),
+                source.short_src.map(|value| value.into_owned()),
+                source.line_defined,
+                source.last_line_defined,
+                source.what,
+                names.name.map(|value| value.into_owned()),
+                names.name_what,
+                debug.current_line(),
+                debug.function(),
+                debug.stack(),
+            )
+        }) else {
+            return Ok(Value::Nil);
+        };
+        let (
+            source,
+            short_src,
+            line_defined,
+            last_line_defined,
+            source_what,
+            name,
+            name_what,
+            current_line,
+            function,
+            stack,
+        ) = frames;
+        let info = lua.create_table()?;
+        if what.contains('S') {
+            if let Some(value) = source {
+                info.set("source", value)?;
+            }
+            if let Some(value) = short_src {
+                info.set("short_src", value)?;
+            }
+            if let Some(value) = line_defined {
+                info.set("linedefined", value)?;
+            }
+            if let Some(value) = last_line_defined {
+                info.set("lastlinedefined", value)?;
+            }
+            info.set("what", source_what)?;
+        }
+        if what.contains('l') {
+            if let Some(value) = current_line {
+                info.set("currentline", value)?;
+            }
+        }
+        if what.contains('n') {
+            if let Some(value) = name {
+                info.set("name", value)?;
+            }
+            if let Some(value) = name_what {
+                info.set("namewhat", value)?;
+            }
+        }
+        if what.contains('f') {
+            info.set("func", function)?;
+        }
+        if what.contains('u') {
+            let upvalues = lua.create_table()?;
+            upvalues.set("nups", stack.num_ups)?;
+            upvalues.set("nparams", stack.num_params)?;
+            upvalues.set("isvararg", stack.is_vararg)?;
+            info.set("nups", stack.num_ups)?;
+            info.set("nparams", stack.num_params)?;
+            info.set("isvararg", stack.is_vararg)?;
+        }
+        Ok(Value::Table(info))
+    })?;
+    table.set("getinfo", getinfo)?;
+    let traceback =
+        lua.create_function(|lua, (message, level): (Option<String>, Option<usize>)| {
+            lua.traceback(message.as_deref(), level.unwrap_or(1))
+                .map(Value::String)
+        })?;
+    table.set("traceback", traceback)?;
+    lua.globals().set("debug", table)?;
+    Ok(())
+}
+
 /// An optional Lua compatibility host around the same editor and workspace core.
 #[derive(Clone)]
 pub struct Runtime {
@@ -134,6 +230,7 @@ impl Runtime {
         // Configuration needing `debug.getinfo` therefore fails; see
         // LUA_PORTING.md.
         let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
+        install_debug_library(&lua)?;
         let hook_interrupt = Arc::clone(&interrupt);
         lua.set_global_hook(
             HookTriggers::new().every_nth_instruction(10_000),
@@ -2084,12 +2181,29 @@ mod tests {
         runtime
             .eval(
                 r#"
-            assert(debug == nil)
+            assert(ffi == nil, 'ffi')
             local ok = pcall(function() return package.loadlib('/nonexistent', 'luaopen_x') end)
-            assert(not ok)
+            assert(not ok, 'pcall')
             "#,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn the_curated_debug_library_reports_source_locations() {
+        let dir = Directory::new(
+            r#"
+            local info = debug.getinfo(1, "Sl")
+            assert(type(info) == "table")
+            assert(info.short_src:find("visrc.lua") ~= nil)
+            assert(type(info.currentline) == "number")
+            assert(type(info.what) == "string")
+            assert(type(debug.traceback("here")) == "string")
+            assert(debug.getinfo(99) == nil)
+            "#,
+        );
+        let runtime = dir.runtime();
+        runtime.eval("require('vis')").unwrap();
     }
     struct Directory(PathBuf);
     impl Directory {
