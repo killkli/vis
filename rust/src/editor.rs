@@ -4481,7 +4481,7 @@ impl Editor {
             let targets = std::mem::take(&mut self.motion_targets);
             let data = self.text.to_vec();
             if self.operator.is_some() {
-                let ranges = self
+                let ranges: Vec<Range<usize>> = self
                     .selection_set
                     .selections()
                     .iter()
@@ -4500,6 +4500,9 @@ impl Editor {
                         }
                     })
                     .collect();
+                if ranges.len() == 1 {
+                    return self.apply_operator(ranges[0].clone(), linewise);
+                }
                 return self.apply_many_operators(ranges, linewise);
             }
             self.selection_set
