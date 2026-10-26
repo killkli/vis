@@ -76,102 +76,272 @@ fn token_metrics(data: &[u8], pos: usize, column: usize) -> (usize, usize) {
     (if width == 0 && column == 0 { 1 } else { width }, len)
 }
 
+/// One cell of a logical line, before the wrapping is decided.
+struct LineCell {
+    pos: usize,
+    len: usize,
+    kind: CellKind,
+    width: usize,
+    /// The column the cell takes on its row.
+    column: usize,
+    /// The cell is a break character, so a word may wrap after it.
+    brk: bool,
+}
+
+/// A token of a logical line.
+enum Token {
+    Text { pos: usize },
+    Tab { pos: usize },
+    Newline { pos: usize },
+}
+
+/// The length of the UTF-8 sequence starting with the given byte.
+fn utf8_length(byte: u8) -> usize {
+    match byte {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => 1,
+    }
+}
+
 /// Stream the C view's default cell wrapping (empty breakat). Returning `false`
 /// from `visit` stops the walk.
 pub fn walk_cells(
     data: &[u8],
     columns: usize,
     tab_width: usize,
+    visit: impl FnMut(WrappedCell) -> bool,
+) {
+    walk_cells_with_breakat(data, columns, tab_width, "", visit);
+}
+
+/// Stream the C view's cell wrapping. `breakat` names the characters that may
+/// end a line, like the native `view->breakat`; an empty string wraps at the
+/// window width like the native default. Returning `false` from `visit` stops
+/// the walk.
+pub fn walk_cells_with_breakat(
+    data: &[u8],
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
     mut visit: impl FnMut(WrappedCell) -> bool,
 ) {
     let tab_width = tab_width.clamp(1, 8);
+    let columns = columns.max(1);
     let mut row = 0;
-    let mut column = 0;
-    let mut pos = 0;
     let mut line = 1;
+    let mut pos = 0;
+    let mut tokens: Vec<Token> = Vec::new();
     while pos < data.len() {
         let byte = data[pos];
-        if byte == b'\t' {
-            let count = tab_width - column % tab_width;
-            for _ in 0..count {
-                if column == columns {
-                    row += 1;
-                    column = 0;
-                }
-                if !visit(WrappedCell {
-                    row,
-                    line,
-                    column,
-                    width: 1,
-                    pos,
-                    len: 1,
-                    kind: CellKind::Space,
-                }) {
-                    return;
-                }
-                column += 1;
-            }
-            pos += 1;
-        } else if byte == b'\n' {
-            if column == columns {
-                row += 1;
-                column = 0;
-            }
-            if !visit(WrappedCell {
-                row,
-                line,
-                column,
-                width: 1,
-                pos,
-                len: 1,
-                kind: CellKind::Space,
-            }) {
+        if byte == b'\n' {
+            tokens.push(Token::Newline { pos });
+            let (rows, _, stopped) = place_line(
+                &tokens, row, line, columns, tab_width, breakat, data, &mut visit,
+            );
+            if stopped {
                 return;
             }
-            row += 1;
-            column = 0;
-            pos += 1;
+            row += rows;
+            tokens.clear();
             line += 1;
+            pos += 1;
+        } else if byte == b'\t' {
+            tokens.push(Token::Tab { pos });
+            pos += 1;
         } else {
-            let (mut width, len) = token_metrics(data, pos, column);
-            let kind = if width > columns {
-                width = 1;
-                CellKind::Replacement
-            } else {
-                CellKind::Source
-            };
-            if column + width > columns {
-                row += 1;
-                column = 0;
-            }
-            if !visit(WrappedCell {
-                row,
-                line,
-                column,
-                width,
-                pos,
-                len,
-                kind,
-            }) {
-                return;
-            }
-            column += width;
+            let len = utf8_length(byte);
+            tokens.push(Token::Text { pos });
             pos += len;
         }
     }
-    if column == columns {
-        row += 1;
-        column = 0;
+    let mut eof_column = 0;
+    if !tokens.is_empty() {
+        let (rows, column, stopped) = place_line(
+            &tokens, row, line, columns, tab_width, breakat, data, &mut visit,
+        );
+        if stopped {
+            return;
+        }
+        // The end of file cursor sits behind the last cell of the line.
+        if column >= columns {
+            row += rows;
+            eof_column = 0;
+        } else {
+            row += rows.saturating_sub(1);
+            eof_column = column;
+        }
     }
     let _ = visit(WrappedCell {
         row,
         line,
-        column,
+        column: eof_column,
         width: 1,
-        pos,
+        pos: data.len(),
         len: 0,
         kind: CellKind::Eof,
     });
+}
+
+/// Place the cells of one logical line, wrapping like the native view, and
+/// return the number of rows the line occupies and the column behind its
+/// last cell.
+#[allow(clippy::too_many_arguments)]
+fn place_line(
+    tokens: &[Token],
+    base_row: usize,
+    line: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+    data: &[u8],
+    visit: &mut impl FnMut(WrappedCell) -> bool,
+) -> (usize, usize, bool) {
+    // The cells placed on the current row.
+    let mut row_cells: Vec<LineCell> = Vec::new();
+    let mut out_row = 0;
+    let mut out_column = 0;
+    // The column after the last break character, where a word may wrap.
+    let mut wrap_column = 0;
+    // Whether the previously placed cell was a break character.
+    let mut previous_break = false;
+    let mut pending: Vec<LineCell> = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if pending.is_empty() {
+            pending = match &tokens[index] {
+                Token::Text { pos } => {
+                    let (width, len) = token_metrics(data, *pos, out_column);
+                    let kind = if width > columns {
+                        CellKind::Replacement
+                    } else {
+                        CellKind::Source
+                    };
+                    let width = if kind == CellKind::Replacement {
+                        1
+                    } else {
+                        width
+                    };
+                    let text = data
+                        .get(*pos..*pos + len)
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .unwrap_or("");
+                    vec![LineCell {
+                        pos: *pos,
+                        len,
+                        kind,
+                        width,
+                        column: 0,
+                        brk: !breakat.is_empty() && breakat.contains(text),
+                    }]
+                }
+                Token::Tab { pos } => {
+                    let count = tab_width - out_column % tab_width;
+                    (0..count)
+                        .map(|_| LineCell {
+                            pos: *pos,
+                            len: 1,
+                            kind: CellKind::Space,
+                            width: 1,
+                            column: 0,
+                            brk: false,
+                        })
+                        .collect()
+                }
+                Token::Newline { pos } => vec![LineCell {
+                    pos: *pos,
+                    len: 1,
+                    kind: CellKind::Space,
+                    width: 1,
+                    column: 0,
+                    brk: false,
+                }],
+            };
+        }
+        let mut cell = pending.remove(0);
+        if previous_break && !cell.brk {
+            // The native view records the column after a break character.
+            wrap_column = out_column;
+        }
+        previous_break = cell.brk;
+        if out_column + cell.width > columns && !row_cells.is_empty() {
+            // The native view wraps at the last break character and moves the
+            // rest of the row to the next one.
+            let split = if wrap_column > 0 {
+                row_cells
+                    .iter()
+                    .position(|placed| placed.column >= wrap_column)
+                    .filter(|split| *split > 0)
+            } else {
+                None
+            };
+            match split {
+                Some(split) => {
+                    let moved: Vec<LineCell> = row_cells.drain(split..).collect();
+                    if !emit_row(&row_cells, base_row + out_row, line, visit) {
+                        return (out_row, out_column, true);
+                    }
+                    out_row += 1;
+                    out_column = 0;
+                    wrap_column = 0;
+                    for mut moved_cell in moved {
+                        moved_cell.column = out_column;
+                        out_column += moved_cell.width;
+                        row_cells.push(moved_cell);
+                    }
+                    // The cell that triggered the wrap starts the new row.
+                    pending.insert(0, cell);
+                    continue;
+                }
+                None => {
+                    if !emit_row(&row_cells, base_row + out_row, line, visit) {
+                        return (out_row, out_column, true);
+                    }
+                    out_row += 1;
+                    out_column = 0;
+                    row_cells.clear();
+                    wrap_column = 0;
+                    // The cell that triggered the wrap starts the new row.
+                    pending.insert(0, cell);
+                    continue;
+                }
+            }
+        }
+        cell.column = out_column;
+        out_column += cell.width;
+        row_cells.push(cell);
+        if pending.is_empty() {
+            index += 1;
+        }
+    }
+    if !emit_row(&row_cells, base_row + out_row, line, visit) {
+        return (out_row, out_column, true);
+    }
+    (out_row + 1, out_column, false)
+}
+
+/// Emit the cells of one row.
+fn emit_row(
+    row_cells: &[LineCell],
+    row: usize,
+    line: usize,
+    visit: &mut impl FnMut(WrappedCell) -> bool,
+) -> bool {
+    for cell in row_cells {
+        if !visit(WrappedCell {
+            row,
+            line,
+            column: cell.column,
+            width: cell.width,
+            pos: cell.pos,
+            len: cell.len,
+            kind: cell.kind,
+        }) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The source line displayed in a row.
@@ -181,8 +351,18 @@ pub fn line_number_at_row(
     columns: usize,
     tab_width: usize,
 ) -> Option<usize> {
+    line_number_at_row_with_breakat(data, row, columns, tab_width, "")
+}
+
+pub fn line_number_at_row_with_breakat(
+    data: &[u8],
+    row: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<usize> {
     let mut line = None;
-    walk_cells(data, columns.max(1), tab_width, |cell| {
+    walk_cells_with_breakat(data, columns.max(1), tab_width, breakat, |cell| {
         if cell.row == row {
             line = Some(cell.line);
             return false;
@@ -200,9 +380,19 @@ pub fn row_line_numbers(
     columns: usize,
     tab_width: usize,
 ) -> Vec<usize> {
+    row_line_numbers_with_breakat(data, rows, columns, tab_width, "")
+}
+
+pub fn row_line_numbers_with_breakat(
+    data: &[u8],
+    rows: Range<usize>,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Vec<usize> {
     let mut numbers = Vec::new();
     let mut last: Option<usize> = None;
-    walk_cells(data, columns.max(1), tab_width, |cell| {
+    walk_cells_with_breakat(data, columns.max(1), tab_width, breakat, |cell| {
         if cell.row < rows.start {
             return true;
         }
@@ -226,9 +416,19 @@ pub fn screen_position(
     columns: usize,
     tab_width: usize,
 ) -> (usize, usize) {
+    screen_position_with_breakat(data, position, columns, tab_width, "")
+}
+
+pub fn screen_position_with_breakat(
+    data: &[u8],
+    position: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> (usize, usize) {
     let position = position.min(data.len());
     let mut coordinate = (0, 0);
-    walk_cells(data, columns.max(1), tab_width, |cell| {
+    walk_cells_with_breakat(data, columns.max(1), tab_width, breakat, |cell| {
         let found = if position == data.len() {
             cell.kind == CellKind::Eof
         } else {
@@ -245,8 +445,18 @@ pub fn screen_position(
 /// First source byte of a display row, or `None` when the row is not reached
 /// before EOF. C positions window motions at the start of the requested row.
 pub fn row_start(data: &[u8], row: usize, columns: usize, tab_width: usize) -> Option<usize> {
+    row_start_with_breakat(data, row, columns, tab_width, "")
+}
+
+pub fn row_start_with_breakat(
+    data: &[u8],
+    row: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<usize> {
     let mut start = None;
-    walk_cells(data, columns.max(1), tab_width, |cell| {
+    walk_cells_with_breakat(data, columns.max(1), tab_width, breakat, |cell| {
         if cell.kind == CellKind::Eof {
             return false;
         }
@@ -261,8 +471,18 @@ pub fn row_start(data: &[u8], row: usize, columns: usize, tab_width: usize) -> O
 
 /// Last source byte of a display row's final cell, or `None` outside the text.
 pub fn row_finish(data: &[u8], row: usize, columns: usize, tab_width: usize) -> Option<usize> {
+    row_finish_with_breakat(data, row, columns, tab_width, "")
+}
+
+pub fn row_finish_with_breakat(
+    data: &[u8],
+    row: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<usize> {
     let mut finish = None;
-    walk_cells(data, columns.max(1), tab_width, |cell| {
+    walk_cells_with_breakat(data, columns.max(1), tab_width, breakat, |cell| {
         if cell.kind == CellKind::Eof {
             return false;
         }
@@ -277,7 +497,17 @@ pub fn row_finish(data: &[u8], row: usize, columns: usize, tab_width: usize) -> 
 
 /// Number of display columns occupied by a row, or `None` past the text.
 pub fn row_width(data: &[u8], row: usize, columns: usize, tab_width: usize) -> Option<usize> {
-    row_end_column(data, row, columns, tab_width).map(|end| end + 1)
+    row_width_with_breakat(data, row, columns, tab_width, "")
+}
+
+pub fn row_width_with_breakat(
+    data: &[u8],
+    row: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<usize> {
+    row_end_column_with_breakat(data, row, columns, tab_width, breakat).map(|end| end + 1)
 }
 
 /// Index of the final display row, which holds the EOF cursor cell.
@@ -307,9 +537,19 @@ pub fn last_source_row(data: &[u8], columns: usize, tab_width: usize) -> Option<
 /// Display position of the last cursor cell in a row: C's screen-line end uses
 /// `line.width - 1`, i.e. the start column of the final cell.
 pub fn row_end_column(data: &[u8], row: usize, columns: usize, tab_width: usize) -> Option<usize> {
+    row_end_column_with_breakat(data, row, columns, tab_width, "")
+}
+
+pub fn row_end_column_with_breakat(
+    data: &[u8],
+    row: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<usize> {
     let columns = columns.max(1);
     let mut end = None;
-    walk_cells(data, columns, tab_width, |cell| {
+    walk_cells_with_breakat(data, columns, tab_width, breakat, |cell| {
         if cell.kind == CellKind::Eof {
             return false;
         }
@@ -335,8 +575,19 @@ pub fn position_at(
     columns: usize,
     tab_width: usize,
 ) -> Option<usize> {
+    position_at_with_breakat(data, row, column, columns, tab_width, "")
+}
+
+pub fn position_at_with_breakat(
+    data: &[u8],
+    row: usize,
+    column: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<usize> {
     let mut position = None;
-    walk_cells(data, columns.max(1), tab_width, |cell| {
+    walk_cells_with_breakat(data, columns.max(1), tab_width, breakat, |cell| {
         if cell.kind == CellKind::Eof {
             return false;
         }
@@ -357,6 +608,30 @@ pub fn position_at(
 
 #[cfg(test)]
 mod tests {
+    /// The number of columns every row occupies.
+    fn row_widths(data: &[u8], columns: usize, breakat: &str) -> Vec<usize> {
+        let mut widths: Vec<usize> = Vec::new();
+        walk_cells_with_breakat(data, columns, 8, breakat, |cell| {
+            while widths.len() <= cell.row {
+                widths.push(0);
+            }
+            widths[cell.row] = widths[cell.row].max(cell.column + cell.width);
+            true
+        });
+        widths
+    }
+
+    #[test]
+    fn the_break_characters_keep_a_word_together() {
+        let data = b"hello world foo\n";
+        // Without break characters the text wraps at the column.
+        // Without break characters the text wraps at the column.
+        assert_eq!(&row_widths(data, 8, "")[..2], [8, 8]);
+        // A space as break character moves the word to the next row, so the
+        // first row holds only "hello ".
+        assert_eq!(&row_widths(data, 8, " ")[..2], [6, 6]);
+    }
+
     use super::*;
 
     #[test]

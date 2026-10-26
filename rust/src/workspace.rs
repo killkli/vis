@@ -40,7 +40,7 @@ pub enum Layout {
 }
 
 /// Window geometry and decorations are independent of its buffer's purpose.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDisplay {
     pub oneline: bool,
     pub statusbar: bool,
@@ -64,6 +64,8 @@ pub struct WindowDisplay {
     pub shownewlines: bool,
     /// Native `wrapcolumn` option: wrap the text at this column.
     pub wrapcolumn: usize,
+    /// Native `breakat` option: the characters that may end a line.
+    pub breakat: std::sync::Arc<str>,
 }
 
 impl Default for WindowDisplay {
@@ -81,6 +83,7 @@ impl Default for WindowDisplay {
             showtabs: false,
             shownewlines: false,
             wrapcolumn: 0,
+            breakat: std::sync::Arc::from(""),
         }
     }
 }
@@ -557,7 +560,7 @@ impl Workspace {
                             |document| document.path().to_path_buf(),
                         ),
                     modified: text.modified(),
-                    display: window.display,
+                    display: window.display.clone(),
                     prompt_executing: active && !self.executing_prompts.is_empty(),
                     tab_width: if active {
                         self.editor.tab_width

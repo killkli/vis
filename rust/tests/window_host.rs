@@ -134,7 +134,7 @@ fn split_copies_primary_ui_and_local_maps_after_open_callback_and_retains_chosen
         showeof: false,
         ..WindowDisplay::default()
     };
-    ws.set_window_display(source, flags).unwrap();
+    ws.set_window_display(source, flags.clone()).unwrap();
     ws.editor
         .map_alias(Mode::Normal, "Q", "iS<Escape>", Some(source as u64))
         .unwrap();

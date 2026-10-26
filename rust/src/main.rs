@@ -779,7 +779,7 @@ fn render_views(frames: &[vis::workspace::Frame]) -> Vec<vis::terminal::RenderVi
             path: &frame.path,
             modified: frame.modified,
             prompt: None,
-            display: frame.display,
+            display: frame.display.clone(),
             prompt_executing: frame.prompt_executing,
             topline: frame.topline,
             anchor: frame.anchor,

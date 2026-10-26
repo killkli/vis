@@ -728,12 +728,12 @@ impl Inner {
             return Some(OptionScope::Global);
         }
         match name {
-            "autoindent" | "ai" | "shell" | "escdelay" | "ignorecase" | "ic"
-            | "loadmethod" | "change256colors" => Some(OptionScope::Global),
+            "autoindent" | "ai" | "shell" | "escdelay" | "ignorecase" | "ic" | "loadmethod"
+            | "change256colors" => Some(OptionScope::Global),
             "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof"
             | "numbers" | "nu" | "relativenumbers" | "rnu" | "numberwidth" | "nuw"
             | "cursorline" | "cul" | "colorcolumn" | "cc" | "showspaces" | "showtabs"
-            | "shownewlines" | "wrapcolumn" | "wc" => Some(OptionScope::Window),
+            | "shownewlines" | "wrapcolumn" | "wc" | "breakat" | "brk" => Some(OptionScope::Window),
             _ => None,
         }
     }
@@ -788,9 +788,7 @@ impl Inner {
                         self.workspace.borrow().editor.change256colors(),
                     )),
                     "loadmethod" => match self.workspace.borrow().editor.loadmethod() {
-                        Some(method) => Ok(Value::String(
-                            self.lua.create_string(method)?,
-                        )),
+                        Some(method) => Ok(Value::String(self.lua.create_string(method)?)),
                         None => Ok(Value::Nil),
                     },
                     "shell" => {
@@ -822,6 +820,13 @@ impl Inner {
                     },
                     "wrapcolumn" | "wc" => match ws.window_display(id) {
                         Some(display) => Value::Integer(display.wrapcolumn as i64),
+                        None => Value::Nil,
+                    },
+                    "breakat" | "brk" => match ws.window_display(id) {
+                        Some(display) => {
+                            let characters = self.lua.create_string(display.breakat.as_ref())?;
+                            Value::String(characters)
+                        }
                         None => Value::Nil,
                     },
                     _ => match ws.window_display(id) {
@@ -1043,6 +1048,21 @@ impl Inner {
             }
             ws.set_window_display(id, display)
                 .map_err(mlua::Error::external)?;
+            return Ok(true);
+        }
+        if matches!(name, "breakat" | "brk") {
+            let Some(mut display) = ws.window_display(id) else {
+                return Ok(false);
+            };
+            let characters = match value {
+                Value::String(characters) => characters.to_str()?.to_string(),
+                Value::Nil => String::new(),
+                _ => return Err(mlua::Error::runtime("expected break characters")),
+            };
+            display.breakat = std::sync::Arc::from(characters.as_str());
+            ws.set_window_display(id, display)
+                .map_err(mlua::Error::external)?;
+            ws.editor.set_breakat(Some(characters));
             return Ok(true);
         }
         if matches!(

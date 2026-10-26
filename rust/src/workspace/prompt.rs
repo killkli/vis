@@ -352,7 +352,10 @@ impl Workspace {
     }
 
     pub fn window_display(&self, id: usize) -> Option<WindowDisplay> {
-        self.windows.iter().find(|w| w.id == id).map(|w| w.display)
+        self.windows
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.display.clone())
     }
 
     pub fn set_window_display(&mut self, id: usize, display: WindowDisplay) -> io::Result<()> {
@@ -361,8 +364,9 @@ impl Workspace {
             .iter()
             .position(|window| window.id == id)
             .ok_or_else(|| invalid("closed window"))?;
+        let oneline = display.oneline;
         self.windows[index].display = display;
-        if display.oneline && index + 1 < self.windows.len() {
+        if oneline && index + 1 < self.windows.len() {
             let active = self.active_window_id();
             let window = self.windows.remove(index);
             self.windows.push(window);

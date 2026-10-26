@@ -240,6 +240,15 @@ impl Workspace {
                     .ok_or_else(|| invalid("wrap column must be a number"))?;
                 self.set_window_display(window, display)?;
             }
+            "breakat" | "brk" => {
+                let characters = value.ok_or_else(|| invalid("break characters are required"))?;
+                let mut display = self
+                    .window_display(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                display.breakat = std::sync::Arc::from(characters);
+                self.set_window_display(window, display)?;
+                self.editor.set_breakat(Some(characters.to_string()));
+            }
             _ => return Err(invalid(format!("unsupported option: {name}"))),
         }
         self.set_window_options(window, width, expand, auto)?;

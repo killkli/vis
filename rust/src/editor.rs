@@ -579,6 +579,8 @@ pub struct Editor {
     loadmethod: Option<String>,
     /// Native `change256colors` option: use the alternative 256 color palette.
     change256colors: bool,
+    /// Native `breakat` option: the characters that may end a line.
+    breakat: std::sync::Arc<str>,
     /// Native `view->start_mark`: the first displayed row is tracked by a text
     /// mark, so edits above the view keep the visible content in place.
     view_anchor: Option<crate::text::Mark>,
@@ -683,6 +685,7 @@ impl Editor {
             ignorecase: false,
             loadmethod: None,
             change256colors: false,
+            breakat: std::sync::Arc::from(""),
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -1891,7 +1894,13 @@ impl Editor {
         let byte = self.text.mark_get(mark.clone())?;
         let data = self.text.to_vec();
         let columns = self.viewport.width.max(1);
-        let (row, _) = crate::view::screen_position(&data, byte, columns, self.tab_width);
+        let (row, _) = crate::view::screen_position_with_breakat(
+            &data,
+            byte,
+            columns,
+            self.tab_width,
+            &self.breakat,
+        );
         Some(row)
     }
 
@@ -1899,7 +1908,9 @@ impl Editor {
     pub fn set_view_anchor(&mut self, row: usize) {
         let data = self.text.to_vec();
         let columns = self.viewport.width.max(1);
-        let Some(byte) = crate::view::row_start(&data, row, columns, self.tab_width) else {
+        let Some(byte) =
+            crate::view::row_start_with_breakat(&data, row, columns, self.tab_width, &self.breakat)
+        else {
             self.view_anchor = None;
             return;
         };
@@ -1933,7 +1944,13 @@ impl Editor {
         let height = viewport.height.max(1);
         let top = viewport.top;
         let data = self.text.to_vec();
-        let (row, _) = crate::view::screen_position(&data, self.cursor, columns, self.tab_width);
+        let (row, _) = crate::view::screen_position_with_breakat(
+            &data,
+            self.cursor,
+            columns,
+            self.tab_width,
+            &self.breakat,
+        );
         if row < top || row >= top.saturating_add(height) {
             self.request_scroll(row.saturating_sub(height / 2));
         }
@@ -2483,6 +2500,16 @@ impl Editor {
 
     pub fn change256colors(&self) -> bool {
         self.change256colors
+    }
+
+    /// Native `breakat` option: the characters that may end a line, so that a
+    /// word is kept together when it does not fit.
+    pub fn set_breakat(&mut self, breakat: Option<String>) {
+        self.breakat = std::sync::Arc::from(breakat.unwrap_or_default());
+    }
+
+    pub fn breakat(&self) -> &str {
+        &self.breakat
     }
 
     pub fn ignorecase(&self) -> bool {
@@ -6449,6 +6476,8 @@ impl Editor {
                 | "shownewlines"
                 | "wrapcolumn"
                 | "wc"
+                | "breakat"
+                | "brk"
         ) {
             return None;
         }
@@ -6583,9 +6612,7 @@ impl Editor {
                             "noexpandtab" | "noet" => self.expand_tab = false,
                             "ignorecase" | "ic" => self.ignorecase = boolean(inline.as_deref())?,
                             "noignorecase" | "noic" => self.ignorecase = false,
-                            "change256colors" => {
-                                self.change256colors = boolean(inline.as_deref())?
-                            }
+                            "change256colors" => self.change256colors = boolean(inline.as_deref())?,
                             "loadmethod" => {
                                 let method = match inline {
                                     Some(value) => value,

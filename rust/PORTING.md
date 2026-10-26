@@ -122,6 +122,11 @@ reported as well. This port always reads a file as raw bytes, so both load
 methods behave the same here, and the alternative color palette is not
 implemented.
 
+The native `breakat` option is wired: the characters that may end a line keep
+a word together when it does not fit, like the native `view->breakat`. The
+core cell model places the cells of a logical line and wraps at the last break
+character, so the motions and the rendering agree on the layout.
+
 The remaining native window options are accepted and reported:
 `cursorline`, `colorcolumn`, `showspaces`, `showtabs`, `shownewlines` and
 `wrapcolumn`. The `wrapcolumn` option wraps the text at the smaller of the
@@ -214,6 +219,8 @@ Known compatibility differences and limits:
   in-place write can leave partial data. Explicit atomic replacement preserves
   Unix owner/group/mode, rejects linked files, and does not copy ACLs/xattrs.
   Conflict checks are best effort, not filesystem locks.
+* The native `breakat` option wraps a line at the last break character; the
+  word itself may overflow the window width, like the native editor.
 * The native `cursorline` and `colorcolumn` options are accepted and
   reported but not drawn, like the native editor, which stores them without
   using them. The replacement symbols of `showspaces`, `showtabs` and

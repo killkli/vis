@@ -867,11 +867,27 @@ struct PanelFrame {
 
 /// Re-exported for compatibility: coordinate requests share the core layout.
 pub use crate::view::screen_position;
-use crate::view::{CellKind, walk_cells};
+use crate::view::{CellKind, screen_position_with_breakat, walk_cells, walk_cells_with_breakat};
 
 /// Zero-based soft-wrapped coordinates for a cursor position.
-fn wrapped_cursor(data: &[u8], cursor: usize, columns: usize, tab_width: usize) -> (usize, usize) {
-    screen_position(data, cursor, columns.max(1), tab_width)
+fn wrapped_cursor(
+    data: &[u8],
+    cursor: usize,
+    columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> (usize, usize) {
+    screen_position_with_breakat(data, cursor, columns.max(1), tab_width, breakat)
+}
+
+#[cfg(test)]
+fn wrapped_cursor_default(
+    data: &[u8],
+    cursor: usize,
+    columns: usize,
+    tab_width: usize,
+) -> (usize, usize) {
+    wrapped_cursor(data, cursor, columns, tab_width, "")
 }
 
 #[cfg(test)]
@@ -882,9 +898,12 @@ fn wrapped_rows(
     visible: Range<usize>,
     selections: &[Range<usize>],
 ) -> Vec<RenderedLine> {
-    wrapped_rows_decorated(data, columns, tab_width, visible, selections, None, true)
+    wrapped_rows_decorated(
+        data, columns, tab_width, visible, selections, None, true, "",
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wrapped_rows_decorated(
     data: &[u8],
     columns: usize,
@@ -893,6 +912,7 @@ fn wrapped_rows_decorated(
     selections: &[Range<usize>],
     decorations: Option<&ViewDecorations>,
     show_eof: bool,
+    breakat: &str,
 ) -> Vec<RenderedLine> {
     let mut lines: Vec<_> = (visible.clone())
         .map(|_| RenderedLine {
@@ -903,7 +923,7 @@ fn wrapped_rows_decorated(
     let mut selected = vec![false; lines.len()];
     let mut sequences = vec![String::new(); lines.len()];
     let mut eof_row = None;
-    walk_cells(data, columns, tab_width, |cell| {
+    walk_cells_with_breakat(data, columns, tab_width, breakat, |cell| {
         if matches!(cell.kind, CellKind::Eof) {
             eof_row = Some(cell.row);
         }
@@ -1205,7 +1225,7 @@ fn compose_views_decorated(
             focused,
             view.tab_width,
             decorations.get(&view.id),
-            view.display,
+            view.display.clone(),
             &overlay,
             view.topline,
             view.anchor,
@@ -1389,9 +1409,16 @@ impl Viewport {
         } else {
             text_columns
         };
-        let (cursor_row, cursor_column) = wrapped_cursor(data, cursor, wrap_columns, tab_width);
-        let cursor_line =
-            crate::view::line_number_at_row(data, cursor_row, text_columns, tab_width).unwrap_or(1);
+        let (cursor_row, cursor_column) =
+            wrapped_cursor(data, cursor, wrap_columns, tab_width, &display.breakat);
+        let cursor_line = crate::view::line_number_at_row_with_breakat(
+            data,
+            cursor_row,
+            text_columns,
+            tab_width,
+            &display.breakat,
+        )
+        .unwrap_or(1);
         let numbers = line_numbers(
             data,
             self.top,
@@ -1468,6 +1495,7 @@ impl Viewport {
             selections,
             decorations,
             display.showeof,
+            &display.breakat,
         );
         for (row, rendered) in visible.into_iter().enumerate() {
             frame.push_str(&format!("\x1b[{};{}H", region.y + row + 1, region.x + 1));
@@ -1678,7 +1706,7 @@ fn ordered_panel(
     let mut last_source = None;
     let mut source_position = 0;
     let mut visible_start = None;
-    walk_cells(data, wrap_width, tab_width, |cell| {
+    walk_cells_with_breakat(data, wrap_width, tab_width, &display.breakat, |cell| {
         let file_bytes = if last_source == Some(cell.pos) {
             0
         } else {
@@ -1790,7 +1818,8 @@ fn ordered_panel(
                     .max()
                     .map_or(start, |position| motion::char_next(data, position));
                 for (position, is_primary) in &overlay.cursors {
-                    let (row, column) = wrapped_cursor(data, *position, text_width, tab_width);
+                    let (row, column) =
+                        wrapped_cursor(data, *position, text_width, tab_width, &display.breakat);
                     if row >= top && row < top + body_height && column < text_width {
                         let cell = &mut body[(row - top) * text_width + column];
                         cell.style = cell
@@ -1802,8 +1831,13 @@ fn ordered_panel(
                             motion::bracket_match_range(data, *position, start..end)
                                 .filter(|matching| matching != position)
                         {
-                            let (row, column) =
-                                wrapped_cursor(data, matching, text_width, tab_width);
+                            let (row, column) = wrapped_cursor(
+                                data,
+                                matching,
+                                text_width,
+                                tab_width,
+                                &display.breakat,
+                            );
                             if row >= top && row < top + body_height && column < text_width {
                                 let cell = &mut body[(row - top) * text_width + column];
                                 cell.style = cell.style.merge(*selection);
@@ -1906,7 +1940,8 @@ fn sidebar_columns(
     let last = if body == 0 {
         1
     } else {
-        crate::view::line_number_at_row(data, top + body - 1, columns, tab_width).unwrap_or(1)
+        crate::view::line_number_at_row_with_breakat(data, top + body - 1, columns, tab_width, "")
+            .unwrap_or(1)
     };
     (last.to_string().len() + 1)
         .max(display.numberwidth)
@@ -1928,7 +1963,8 @@ fn line_numbers(
     if width == 0 {
         return LineNumbers::none();
     }
-    let lines = crate::view::row_line_numbers(data, top..top + body, columns, tab_width);
+    let lines =
+        crate::view::row_line_numbers_with_breakat(data, top..top + body, columns, tab_width, "");
     let numbers = lines
         .into_iter()
         .map(|line| {
@@ -2495,7 +2531,7 @@ mod tests {
             cells: BTreeMap::from([((3, 0), 22)]),
             ..ViewDecorations::default()
         };
-        let lines = wrapped_rows_decorated(b"ab", 5, 8, 0..1, &[], Some(&styles), true);
+        let lines = wrapped_rows_decorated(b"ab", 5, 8, 0..1, &[], Some(&styles), true, "");
         assert!(
             lines[0].text.contains("\x1b[3;32;47ma"),
             "{:?}",
@@ -3028,25 +3064,25 @@ mod tests {
             rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
             ["abcde", " ", "X ", "~"]
         );
-        assert_eq!(wrapped_cursor(b"abcde\nX", 5, 5, 8), (1, 0));
-        assert_eq!(wrapped_cursor(b"abcde\nX", 6, 5, 8), (2, 0));
-        assert_eq!(wrapped_cursor(b"abcdefghij", 10, 5, 8), (2, 0));
+        assert_eq!(wrapped_cursor_default(b"abcde\nX", 5, 5, 8), (1, 0));
+        assert_eq!(wrapped_cursor_default(b"abcde\nX", 6, 5, 8), (2, 0));
+        assert_eq!(wrapped_cursor_default(b"abcdefghij", 10, 5, 8), (2, 0));
         let rows = wrapped_rows(b"a\tb", 5, 8, 0..2, &[]);
         assert_eq!(
             rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
             ["a    ", "   b "]
         );
-        assert_eq!(wrapped_cursor(b"a\tb", 2, 5, 8), (1, 3));
-        assert_eq!(wrapped_cursor(b"a\tb", 2, 8, 4), (0, 4));
-        assert_eq!(wrapped_cursor(b"a\tb", 2, 8, 8), (1, 0));
+        assert_eq!(wrapped_cursor_default(b"a\tb", 2, 5, 8), (1, 3));
+        assert_eq!(wrapped_cursor_default(b"a\tb", 2, 8, 4), (0, 4));
+        assert_eq!(wrapped_cursor_default(b"a\tb", 2, 8, 8), (1, 0));
     }
 
     #[test]
     fn wide_combining_and_single_column_wrap_are_bounded() {
         let data = "ab界c".as_bytes();
-        assert_eq!(wrapped_cursor(data, 2, 3, 8), (1, 0));
-        assert_eq!(wrapped_cursor(data, 5, 3, 8), (1, 2));
-        assert_eq!(wrapped_cursor(data, 6, 3, 8), (2, 0));
+        assert_eq!(wrapped_cursor_default(data, 2, 3, 8), (1, 0));
+        assert_eq!(wrapped_cursor_default(data, 5, 3, 8), (1, 2));
+        assert_eq!(wrapped_cursor_default(data, 6, 3, 8), (2, 0));
         let data = "a\u{301}bc".as_bytes();
         let rows = wrapped_rows(data, 2, 8, 0..2, &[]);
         assert_eq!(rows[0].text, "a\u{301}b");

@@ -2086,7 +2086,10 @@ use super::{Editor, EditorAction, EditorError, Operator, Pending, Placement, Pro
 use crate::{
     motion,
     selection::Selection,
-    view::{last_row, last_source_row, position_at, row_start, row_width, screen_position},
+    view::{
+        last_row, last_source_row, position_at_with_breakat, row_start_with_breakat,
+        row_width_with_breakat, screen_position_with_breakat,
+    },
 };
 
 impl Editor {
@@ -2861,7 +2864,13 @@ impl Editor {
         use NativeWindow as W;
         let viewport = self.viewport;
         let data = self.text.to_vec();
-        let (row, _) = screen_position(&data, self.cursor, viewport.width.max(1), self.tab_width);
+        let (row, _) = screen_position_with_breakat(
+            &data,
+            self.cursor,
+            viewport.width.max(1),
+            self.tab_width,
+            self.breakat(),
+        );
         let top = match window {
             W::Top => row,
             W::Center => row.saturating_sub(viewport.height / 2),
@@ -2883,12 +2892,16 @@ impl Editor {
         let data = self.text.to_vec();
         let last = last_row(&data, columns, tab_width);
         let top = viewport.top.min(last);
-        let (cursor_row, cursor_column) = screen_position(&data, self.cursor, columns, tab_width);
+        let (cursor_row, cursor_column) =
+            screen_position_with_breakat(&data, self.cursor, columns, tab_width, self.breakat());
+        let breakat = self.breakat.clone();
         let row_begin = |row: usize| -> usize {
-            row_start(&data, row, columns, tab_width).unwrap_or(data.len())
+            row_start_with_breakat(&data, row, columns, tab_width, &breakat).unwrap_or(data.len())
         };
+        let breakat = self.breakat.clone();
         let row_position = |row: usize, column: usize| -> usize {
-            position_at(&data, row, column, columns, tab_width).unwrap_or(data.len())
+            position_at_with_breakat(&data, row, column, columns, tab_width, &breakat)
+                .unwrap_or(data.len())
         };
         // The view can only scroll while a row exists below the visible body.
         let can_scroll_down = top.saturating_add(height) <= last;
@@ -3047,17 +3060,27 @@ impl Editor {
                 return None;
             }
             if row < last {
-                return position_at(&data, row, column, columns, tab_width);
+                return position_at_with_breakat(
+                    &data,
+                    row,
+                    column,
+                    columns,
+                    tab_width,
+                    self.breakat(),
+                );
             }
             // The final row may hold only the EOF cursor cell.
-            Some(position_at(&data, row, column, columns, tab_width).unwrap_or(data.len()))
+            Some(
+                position_at_with_breakat(&data, row, column, columns, tab_width, self.breakat())
+                    .unwrap_or(data.len()),
+            )
         };
         let source_last = last_source_row(&data, columns, tab_width);
         let locate_row = |row: usize| -> Option<usize> {
             match source_last {
                 Some(source_last) => {
                     let row = row.min(source_last);
-                    row_start(&data, row, columns, tab_width)
+                    row_start_with_breakat(&data, row, columns, tab_width, self.breakat())
                 }
                 None => Some(data.len()),
             }
@@ -3068,14 +3091,19 @@ impl Editor {
         let mut preferred = self.preferred_column;
         for selection in self.selections().to_vec() {
             let cursor = selection.cursor.min(data.len());
-            let (row, column) = screen_position(&data, cursor, columns, tab_width);
+            let (row, column) =
+                screen_position_with_breakat(&data, cursor, columns, tab_width, self.breakat());
             let desired = preferred.unwrap_or(column);
             let target = match movement {
                 M::ScreenLineBegin => locate(row, 0),
-                M::ScreenLineMiddle => row_width(&data, row, columns, tab_width)
-                    .and_then(|width| locate(row, width / 2)),
-                M::ScreenLineEnd => row_width(&data, row, columns, tab_width)
-                    .and_then(|width| locate(row, width.saturating_sub(1))),
+                M::ScreenLineMiddle => {
+                    row_width_with_breakat(&data, row, columns, tab_width, self.breakat())
+                        .and_then(|width| locate(row, width / 2))
+                }
+                M::ScreenLineEnd => {
+                    row_width_with_breakat(&data, row, columns, tab_width, self.breakat())
+                        .and_then(|width| locate(row, width.saturating_sub(1)))
+                }
                 M::ScreenLineUp => {
                     preferred = Some(desired);
                     locate(row.saturating_sub(count), desired)

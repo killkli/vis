@@ -36,6 +36,15 @@ fn the_remaining_native_window_options_are_accepted() {
 }
 
 #[test]
+fn the_break_characters_option_is_accepted() {
+    let mut ws = workspace();
+    prompt(&mut ws, ":set breakat ,");
+    let display = ws.window_display(ws.active_window_id()).unwrap();
+    assert_eq!(display.breakat.as_ref(), ",");
+    assert_eq!(ws.editor.breakat(), ",");
+}
+
+#[test]
 fn an_invalid_option_value_is_rejected() {
     let mut ws = workspace();
     prompt(&mut ws, ":set colorcolumn soon");
