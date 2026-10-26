@@ -4611,6 +4611,9 @@ impl Editor {
             _ => {}
         }
         match key {
+            Key::Char('0') => {
+                return self.invoke_native_action(NativeAction::CursorScreenLineBegin);
+            }
             Key::Char('j') => return self.invoke_native_action(NativeAction::CursorScreenLineDown),
             Key::Char('k') => return self.invoke_native_action(NativeAction::CursorScreenLineUp),
             Key::Char('m') => {

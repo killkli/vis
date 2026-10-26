@@ -111,6 +111,16 @@ fn screen_lines_use_wrapped_columns_and_rows() {
 }
 
 #[test]
+fn g0_is_bound_to_the_screen_line_begin() {
+    let mut ws = workspace(b"abcdefghij");
+    measure(&mut ws, 4, 3, 0);
+    keys(&mut ws, "5l");
+    assert_eq!(ws.editor.cursor, 5, "second wrapped row");
+    keys(&mut ws, "g0");
+    assert_eq!(ws.editor.cursor, 4, "row start, not the file line start");
+}
+
+#[test]
 fn screen_line_column_preference_survives_wide_tokens() {
     let mut ws = workspace("ab界c".as_bytes());
     measure(&mut ws, 3, 3, 0);
