@@ -142,9 +142,9 @@ stored but never drawn by the native editor either.
 
 The native `numbers`, `relativenumbers` and `numberwidth` options draw the
 line number sidebar: the number of every visible row, right aligned in front of
-the text, with the distance to the cursor line for the relative variant. The
-sidebar takes its width from the visible line numbers, like the native editor,
-and the body is laid out in the remaining columns. The window scoped options
+the text with one separating space, with the distance to the cursor line for the
+relative variant. The sidebar takes its width from the visible line numbers,
+like the native editor, and the body is laid out in the remaining columns. The window scoped options
 (`statusbar`, `showeof`, `oneline` and the number options) are applied by the
 host, which owns the window display, so `:set` reaches them again.
 

@@ -2266,7 +2266,7 @@ fn draw_sidebar(
             let cell = &mut ui[row * width + column];
             cell.style = style;
             cell.width = 1;
-            cell.text.clear();
+            cell.text = " ".into();
         }
         for (offset, character) in text.chars().enumerate() {
             let cell = &mut ui[row * width + padding + offset];
@@ -3323,6 +3323,44 @@ mod tests {
         assert!(panel.text.contains("2 two"), "{:?}", panel.text);
         // The body keeps the remaining columns.
         assert!(panel.text.contains("three"), "{:?}", panel.text);
+    }
+
+    #[test]
+    fn the_decorated_line_number_sidebar_keeps_the_separating_space() {
+        let data = b"one\ntwo\nthree\n";
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 4,
+        };
+        let mut viewport = Viewport::default();
+        let display = WindowDisplay {
+            numbers: true,
+            ..WindowDisplay::default()
+        };
+        let decorations = ViewDecorations {
+            operations: vec![DrawOperation::BodyCopy],
+            ..ViewDecorations::default()
+        };
+        let panel = viewport.panel_decorated(
+            data,
+            0,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            Some(&decorations),
+            display,
+            &OverlayContext::default(),
+            None,
+            None,
+        );
+        assert!(panel.text.contains("1 one"), "{:?}", panel.text);
+        assert!(panel.text.contains("2 two"), "{:?}", panel.text);
+        assert!(panel.text.contains("3 three"), "{:?}", panel.text);
     }
 
     #[test]
