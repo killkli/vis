@@ -1879,6 +1879,10 @@ fn sidebar_columns(
     tab_width: usize,
     display: &WindowDisplay,
 ) -> usize {
+    eprintln!(
+        "DEBUG sidebar numbers={} rnu={}",
+        display.numbers, display.relativenumbers
+    );
     if !display.numbers && !display.relativenumbers {
         return 0;
     }
@@ -1893,7 +1897,6 @@ fn sidebar_columns(
 }
 
 /// The number of every visible row, honouring the native relative numbering.
-#[allow(clippy::too_many_arguments)]
 fn line_numbers(
     data: &[u8],
     top: usize,
@@ -1976,11 +1979,6 @@ fn draw_sidebar(
             cell.width = 1;
             cell.style = style;
         }
-        // The native sidebar separates the number from the text with a space.
-        let separator = &mut ui[row * width + sidebar - 1];
-        separator.text = " ".into();
-        separator.width = 1;
-        separator.style = style;
     }
 }
 
@@ -2859,15 +2857,8 @@ mod tests {
             height: 4,
         };
         let mut viewport = Viewport::default();
-        let display = WindowDisplay {
-            numbers: true,
-            ..WindowDisplay::default()
-        };
-        let overlay = OverlayContext {
-            cursors: Vec::new(),
-            match_brackets: false,
-            native_view: true,
-        };
+        let mut display = WindowDisplay::default();
+        display.numbers = true;
         let panel = viewport.panel_decorated(
             data,
             0,
@@ -2879,7 +2870,7 @@ mod tests {
             8,
             None,
             display,
-            &overlay,
+            &OverlayContext::default(),
             None,
             None,
         );
