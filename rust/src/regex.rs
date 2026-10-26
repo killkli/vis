@@ -113,8 +113,7 @@ impl Atom {
                 let member = members.iter().any(|member| match member {
                     Member::Range(start, end) => {
                         (*start..=*end).contains(&value)
-                            || (ignorecase
-                                && (fold(*start)..=fold(*end)).contains(&folded))
+                            || (ignorecase && (fold(*start)..=fold(*end)).contains(&folded))
                     }
                     // The named classes keep the case of the input.
                     Member::Named(name) => named_class(name, value),
@@ -826,8 +825,6 @@ mod tests {
         let found = lower.find(data, 0..data.len()).unwrap().unwrap();
         assert_eq!(found.range, 1..5);
     }
-
-    use super::*;
 
     fn find(pattern: &str, data: &[u8]) -> Option<Match> {
         Regex::new(pattern)

@@ -43,7 +43,10 @@ fn the_ignorecase_option_makes_the_search_case_insensitive() {
         ws.handle_key(Key::Char(character)).unwrap();
     }
     ws.handle_key(Key::Enter).unwrap();
-    assert_eq!(ws.editor.cursor, 0, "the case sensitive search finds nothing");
+    assert_eq!(
+        ws.editor.cursor, 0,
+        "the case sensitive search finds nothing"
+    );
     ws.command("set ignorecase").unwrap();
     assert!(ws.editor.ignorecase(), "ignorecase option");
     assert!(ws.handle_key(Key::Char('/')).is_ok());
