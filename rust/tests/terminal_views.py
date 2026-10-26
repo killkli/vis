@@ -58,6 +58,12 @@ def cursor(session):
 def run(binary):
     with tempfile.TemporaryDirectory(prefix="vis-views-") as temporary:
         directory = Path(temporary)
+        # An isolated configuration keeps the checks independent of the
+        # developer's own vis settings, such as the line number sidebar.
+        home = directory / "home"
+        (home / ".config" / "vis").mkdir(parents=True)
+        os.environ["HOME"] = str(home)
+        os.environ["VIS_PATH"] = str(home)
         executable = directory / "vis-rs"
         shutil.copy2(binary, executable)
 

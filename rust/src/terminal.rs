@@ -1879,10 +1879,6 @@ fn sidebar_columns(
     tab_width: usize,
     display: &WindowDisplay,
 ) -> usize {
-    eprintln!(
-        "DEBUG sidebar numbers={} rnu={}",
-        display.numbers, display.relativenumbers
-    );
     if !display.numbers && !display.relativenumbers {
         return 0;
     }
