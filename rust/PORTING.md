@@ -528,8 +528,9 @@ operate on the selection with the native linewise handling, while `D`,
 `C`, `Y`, `S` and `X` are unbound and leave the selection untouched.
 `u`/`U` run the selection case operators followed by Escape instead of
 reaching history. Keys that no binding in the active mode chain matches
-are silently discarded, as in `vis_keys_process`, so the remaining
-normal-only keys no longer report errors in visual modes.
+are silently discarded, as in `vis_keys_process`; this now applies to normal
+and operator-pending modes as well, not only visual modes. Routed native
+actions which are conditional or unsupported still report their own error.
 
 `<C-d>`, `<C-u>`, `<C-j>` and `<C-k>` follow native
 `ka_selections_navigate`: with a single selection they scroll half a
@@ -752,3 +753,16 @@ start.
 Verification: focused editor and viewport tests cover macro insertion, counted
 repetition, last-register replay and wrapped-row `g0`; strict Clippy and
 formatting pass.
+
+## Unbound key dispatch checkpoint (2026-10-26, macOS arm64)
+
+Normal and operator-pending modes now discard a key that has no binding in the
+active mode chain, matching `vis_keys_process`; previously only visual modes did
+so and other modes returned an editor error. The fallback sits after binding,
+mapping and pending-state handling, so routed native actions that are conditional
+or unsupported, malformed pending arguments and recursion limits still report
+their specific errors.
+
+Verification: the editor unit test for an unbound `!` asserts unchanged text and
+a consumed `Continue`, and the language-map test keeps its disabled-translation
+non-move as a consumed key before the next mapped key moves. Library tests pass.

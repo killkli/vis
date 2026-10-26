@@ -4161,13 +4161,10 @@ impl Editor {
             }
             _ => {
                 // The native editor silently discards a key that no binding
-                // in the active mode chain matches; the visual tables bind
-                // fewer keys than the normal table, so D/C/Y and friends end
-                // here as no-ops instead of errors.
-                if self.is_visual() {
-                    return Ok(EditorAction::Continue);
-                }
-                return Err(EditorError("unsupported key in this mode".into()));
+                // in the active mode chain matches. Unsupported native actions
+                // still report through their routed handler above; this arm is
+                // only for keys with no binding at all.
+                return Ok(EditorAction::Continue);
             }
         }
         Ok(EditorAction::Continue)
@@ -7918,7 +7915,11 @@ mod tests {
         assert_eq!(e.text.to_vec(), b"one two three\n");
         keys(&mut e, "u");
         assert_eq!(e.text.to_vec(), b"one\n  two\nthree\n");
-        assert!(e.handle_key(Key::Char('!')).is_err());
+        assert_eq!(
+            e.handle_key(Key::Char('!')).unwrap(),
+            EditorAction::Continue
+        );
+        assert_eq!(e.text.to_vec(), b"one\n  two\nthree\n");
         assert_eq!(e.mode, Mode::Normal);
     }
 
@@ -9192,7 +9193,10 @@ mod tests {
         e.feed_keys(vec![Key::Char('д')]).unwrap();
         assert_eq!(e.cursor, 1);
         assert!(e.language_map_disabled);
-        assert!(e.handle_key(Key::Char('д')).is_err());
+        assert_eq!(
+            e.handle_key(Key::Char('д')).unwrap(),
+            EditorAction::Continue
+        );
         assert!(!e.language_map_disabled);
         e.handle_key(Key::Char('д')).unwrap();
         assert_eq!(e.cursor, 3);
