@@ -101,8 +101,11 @@ extend operator ranges only to the line start of the destination row (no
 `LINEWISE_INCLUSIVE`), matching `dH`/`dL`. Until the first frame is drawn the
 motions use native vis's 80-column and 23-body-row no-terminal defaults.
 `zt`/`zz`/`zb` and `vis-redraw` request a one-shot first frame row (top, center
-or bottom of the cursor row); only the page, halfpage and slide scroll actions
-remain unsupported.
+or bottom of the cursor row). The page, halfpage and slide actions move the
+view and the cursor together like native `view_scroll_page_up`,
+`view_scroll_halfpage_down`, `view_slide_up` and their counterparts, and a
+cursor that leaves the visible body is centered on the page like native
+`view_cursors_to`, while line motions keep scrolling the view row by row.
 
 The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
@@ -161,10 +164,9 @@ Known compatibility differences and limits:
   Conflict checks are best effort, not filesystem locks.
 * Width and combining tables approximate the original `wcwidth` behavior. The
   motion differential corpus verifies ASCII/control inputs, not full Unicode.
-* A cursor that jumps outside the measured body follows to the bottom row
-  here, while native `view_cursors_to` centers it by half a page. The page,
-  halfpage and slide actions build on that anchoring policy and stay
-  unsupported until it is ported; `zt`/`zz`/`zb` do not depend on it.
+* A cursor that jumps outside the measured body is centered by half a page,
+  like native `view_cursors_to`, while native line motions keep scrolling the
+  view row by row and leave the cursor on the last or first visible row.
 * After a wrapped multi-cursor word search, C lists the selections in a
   different order from the Rust set. Both expose the same selections and the
   same primary cursor, but ordered comparison (as in the native-action
@@ -326,11 +328,10 @@ default build until those acceptance gates and platform/release work are done.
 
 The named-action catalogue now tracks all 178 entries in C's `KEY_ACTION_LIST`,
 with typed handlers and arguments rather than key-string aliases. Recognition
-and implementation are separate: the current inventory reports 100 implemented,
-72 conditional and 6 unsupported actions. Every unsupported entry is a
-viewport scroll operation (page, halfpage or slide); all other native names are
-routed. Conditional entries are mode restrictions or the measured
-geometry screen-line/window-line motions need a drawn frame first.
+and implementation are separate: the current inventory reports 108 implemented,
+70 conditional and no unsupported actions; every native name is routed.
+Conditional entries are mode restrictions or the measured geometry
+screen-line/window-line motions need a drawn frame first.
 Bounded native-action cases match document bytes, every selection, orientation,
 primary selection and mode before and after Escape, with no unsupported
 requests; this does not establish coverage of all 178 actions. Unsupported
@@ -371,21 +372,20 @@ tests in `rust/tests/jumplist_actions.rs` run in ordinary `cargo test`. The
 all-feature/all-target suite, the standard-library-only suite, strict Clippy
 (default and no-default features) and formatting pass; the key sweeps remain
 108 pass/4 upstream exclusions (core) and 111 pass/1 exclusion (Lua), and the
-native-action differential reports 104 pass with no unsupported cases.
+native-action differential reports 118 pass with no unsupported cases.
 
 ## Native action completion checkpoint (2026-10-26, macOS arm64)
 
 Cross-line character searches, selection case operators, native word-search
-actions and `vis-suspend` are routed, leaving only viewport operations
-unsupported (96 implemented, 64 conditional, 18 unsupported). The
+actions and `vis-suspend` are routed. The viewport operations are routed as
+well (108 implemented, 70 conditional, 0 unsupported). The
 native-action differential reports 118 pass, zero failures and zero unsupported
 requests against C, covering the new find, case (ASCII, multibyte and invalid
 UTF-8) and wrapped-search cases. Word-search helpers now accept a match at the
 search origin, matching native wrapped search; the full key sweeps remain 108/4
 and 111/1. All-feature and standard-library-only tests plus strict Clippy pass.
 Wrapped multi-cursor word-search ordering and literal word search stay
-documented above as open differences, and viewport actions still need a host
-viewport engine. The PTY gate now waits for the real INSERT-status transition instead of
+documented above as open differences. The PTY gate now waits for the real INSERT-status transition instead of
 a status word the native format never draws, and all ten scenarios pass with an
 isolated configuration, including suspend/resume through the new action path.
 
@@ -406,18 +406,25 @@ the final EOF row. Before a frame exists the editor keeps native vis's 80x23
 no-terminal geometry, so headless batch and Lua replay actions stay coherent.
 The redraw actions (`zt`, `zz`, `zb`, `vis-redraw`) set a one-shot requested
 top row on the editor; the workspace exposes it on the next frame and clears it
-after rendering, so later cursor motions auto-follow again. The native inventory
-is now 100 implemented, 72 conditional and 6 unsupported; every unsupported name
-is a page, halfpage or slide scroll action, which first needs the native
-half-page centering policy for out-of-view jumps.
+after rendering, so later cursor motions auto-follow again. The page, halfpage
+and slide actions (`vis-window-page-up/down`, `vis-window-halfpage-up/down`,
+`vis-window-slide-up/down`) follow native `view_scroll_page_up`,
+`view_scroll_halfpage_down`, `view_slide_up` and `view_scroll_up`: they move
+the view and the primary cursor together, and they are bound to `<PageUp>`,
+`<PageDown>`, `<S-PageUp>`, `<S-PageDown>`, `<C-e>` and `<C-y>` like the native
+default table. A cursor that leaves the visible body is now centered on the
+page, matching native `view_cursors_to`, while line motions keep the native
+row-by-row follow. The native inventory is now 108 implemented, 70 conditional
+and no unsupported action.
 
 Window motions clamp to the last row that holds source cells rather than the
 virtual EOF cursor row, matching native `L` in short files.
 
-Verification: eight host tests in `rust/tests/viewport_motions.rs` plus
+Verification: eleven host tests in `rust/tests/viewport_motions.rs` plus
 view-module unit tests cover row lookup, counts, source-row clamping, wrapped
 columns, wide tokens, the `H`/`L`, `gj`/`gk`/`gm`/`g$` and `zt`/`zz`/`zb`
-bindings, one-shot scroll requests reaching frames, the renderer honoring and
+bindings, the page, halfpage and slide geometry, the centered follow of
+out-of-view jumps, one-shot scroll requests reaching frames, the renderer honoring and
 clamping a request, and the no-terminal default geometry. Real PTY comparisons against C match for `L`/`H` on
 short and full windows, `gj`/`gk`, `g$`, `gm`, `zt`/`zz`/`zb`, `dH`, `dL`,
 `dj`, `dgj` and counted window motions. Workspace and terminal PTY scenarios pass 9/9 and 10/10

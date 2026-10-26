@@ -189,3 +189,89 @@ fn redraw_keys_request_cursor_relative_rows() {
     keys(&mut ws, "zb");
     assert_eq!(ws.editor.scroll_request(), Some(95));
 }
+
+fn numbered_lines(count: usize) -> String {
+    let mut text = String::new();
+    for line in 0..count {
+        text.push_str(&format!("line {line:03}\n"));
+    }
+    text
+}
+
+#[test]
+fn scroll_actions_move_the_view_and_the_cursor_like_native() {
+    let text = numbered_lines(100);
+    let mut ws = workspace(text.as_bytes());
+    // Native `view_scroll_page_down` moves a page down and selects the first
+    // row of the new page.
+    measure(&mut ws, 80, 23, 38);
+    ws.editor.cursor = 9 * 49;
+    action(&mut ws, NativeAction::WindowPageDown);
+    assert_eq!(ws.editor.scroll_request(), Some(61));
+    assert_eq!(ws.editor.cursor, 9 * 61);
+
+    // Native `view_scroll_page_up` scrolls a page up and selects the row
+    // above the old top.
+    ws.editor.clear_scroll_request();
+    measure(&mut ws, 80, 23, 38);
+    ws.editor.cursor = 9 * 49;
+    action(&mut ws, NativeAction::WindowPageUp);
+    assert_eq!(ws.editor.scroll_request(), Some(15));
+    assert_eq!(ws.editor.cursor, 9 * 37);
+
+    // Native `view_scroll_halfpage_down` scrolls half a page and selects the
+    // row where the old view ended.
+    ws.editor.clear_scroll_request();
+    measure(&mut ws, 80, 23, 38);
+    ws.editor.cursor = 9 * 49;
+    action(&mut ws, NativeAction::WindowHalfpageDown);
+    assert_eq!(ws.editor.scroll_request(), Some(49));
+    assert_eq!(ws.editor.cursor, 9 * 61);
+
+    // Native `view_scroll_halfpage_up` centers the row above the old top.
+    ws.editor.clear_scroll_request();
+    measure(&mut ws, 80, 23, 38);
+    ws.editor.cursor = 9 * 49;
+    action(&mut ws, NativeAction::WindowHalfpageUp);
+    assert_eq!(ws.editor.scroll_request(), Some(26));
+    assert_eq!(ws.editor.cursor, 9 * 37);
+
+    // Native `view_slide_up` and `view_slide_down` move the view one row and
+    // keep the cursor on its content.
+    ws.editor.clear_scroll_request();
+    measure(&mut ws, 80, 23, 38);
+    ws.editor.cursor = 9 * 49;
+    action(&mut ws, NativeAction::WindowSlideUp);
+    assert_eq!(ws.editor.scroll_request(), Some(39));
+    assert_eq!(ws.editor.cursor, 9 * 49);
+
+    ws.editor.clear_scroll_request();
+    measure(&mut ws, 80, 23, 38);
+    ws.editor.cursor = 9 * 49;
+    action(&mut ws, NativeAction::WindowSlideDown);
+    assert_eq!(ws.editor.scroll_request(), Some(37));
+    assert_eq!(ws.editor.cursor, 9 * 49);
+}
+
+#[test]
+fn jumps_center_the_cursor_when_it_leaves_the_body() {
+    let text = numbered_lines(100);
+    let mut ws = workspace(text.as_bytes());
+    measure(&mut ws, 80, 23, 38);
+    keys(&mut ws, "80G");
+    // Native `view_cursors_to` centers a cursor that left the visible body.
+    assert_eq!(ws.editor.scroll_request(), Some(79 - 11));
+}
+
+#[test]
+fn line_motions_keep_the_incremental_native_follow() {
+    let text = numbered_lines(100);
+    let mut ws = workspace(text.as_bytes());
+    measure(&mut ws, 80, 23, 38);
+    ws.editor.cursor = 9 * 49;
+    keys(&mut ws, "20j");
+    // Native line motions scroll the view row by row, so no centered request
+    // is issued and the renderer keeps the cursor on the last visible row.
+    assert_eq!(ws.editor.scroll_request(), None);
+    assert_eq!(ws.editor.cursor, 9 * 69);
+}

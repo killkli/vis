@@ -1870,6 +1870,21 @@ impl Editor {
         self.scroll_request = None;
     }
 
+    /// Native `view_cursors_to`: a cursor that leaves the visible body is
+    /// centered on the page, while native line motions scroll the view one
+    /// row at a time and keep the cursor on the last or first visible row.
+    fn request_centered_follow(&mut self) {
+        let viewport = self.viewport;
+        let columns = viewport.width.max(1);
+        let height = viewport.height.max(1);
+        let top = viewport.top;
+        let data = self.text.to_vec();
+        let (row, _) = crate::view::screen_position(&data, self.cursor, columns, self.tab_width);
+        if row < top || row >= top.saturating_add(height) {
+            self.request_scroll(row.saturating_sub(height / 2));
+        }
+    }
+
     /// Native `vis_jumplist(vis, advance)`: save, or move once through the ring
     /// and apply the stored mode and geometry. The mode switch runs before the
     /// geometry is applied because leaving visual mode saves its own entry.
@@ -3484,6 +3499,9 @@ impl Editor {
             if jump {
                 self.jumplist_save();
             }
+            if !matches!(key, Key::Char('j' | 'k') | Key::Up | Key::Down | Key::Enter) {
+                self.request_centered_follow();
+            }
             return Ok(action);
         }
         if self.operator.is_some()
@@ -3809,10 +3827,19 @@ impl Editor {
                 };
                 if let Some(range) = next {
                     self.cursor = range.start;
+                    self.request_centered_follow();
                 }
                 self.jumplist_save();
             }
             Key::Char('z' | 'Z') => self.pending = Pending::Z,
+            Key::PageDown => return self.invoke_native_action(NativeAction::WindowPageDown),
+            Key::PageUp => return self.invoke_native_action(NativeAction::WindowPageUp),
+            Key::ShiftPageDown => {
+                return self.invoke_native_action(NativeAction::WindowHalfpageDown);
+            }
+            Key::ShiftPageUp => return self.invoke_native_action(NativeAction::WindowHalfpageUp),
+            Key::Ctrl('e') => return self.invoke_native_action(NativeAction::WindowSlideUp),
+            Key::Ctrl('y') => return self.invoke_native_action(NativeAction::WindowSlideDown),
             Key::Char('q') => self.pending = Pending::MacroRecord,
             Key::Char('@') => self.pending = Pending::MacroPlay,
             Key::Ctrl('w') => self.pending = Pending::Window,

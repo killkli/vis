@@ -176,6 +176,22 @@ pub enum NativeWindow {
     Center,
     Top,
 }
+/// Native window scrolling actions. Native `view_scroll_page_up`,
+/// `view_scroll_halfpage_up`, `view_slide_up` and their counterparts all
+/// move the view and the cursor together.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum NativeScroll {
+    PageDown,
+    PageUp,
+    HalfPageDown,
+    HalfPageUp,
+    SlideDown,
+    SlideUp,
+    /// Native `view_scroll_down`: scroll the view without centering.
+    ScrollDown,
+    /// Native `view_scroll_up`: scroll the view without centering.
+    ScrollUp,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeInfo {
     Unicode,
@@ -189,6 +205,7 @@ pub enum NativeArgument {
     TextObject(NativeTextObject),
     Call(NativeCall),
     Window(NativeWindow),
+    Scroll(NativeScroll),
     Mode(Mode),
     Integer(i64),
     Text(&'static str),
@@ -1594,42 +1611,42 @@ pub const NATIVE_ACTIONS: &[NativeActionDefinition] = &[
         action: NativeAction::WindowHalfpageDown,
         name: "vis-window-halfpage-down",
         handler: NativeHandler::Wscroll,
-        argument: NativeArgument::Integer(2147483646),
+        argument: NativeArgument::Scroll(NativeScroll::HalfPageDown),
         help: "Scroll window half pages forwards (downwards)",
     },
     NativeActionDefinition {
         action: NativeAction::WindowHalfpageUp,
         name: "vis-window-halfpage-up",
         handler: NativeHandler::Wscroll,
-        argument: NativeArgument::Integer(-2147483646),
+        argument: NativeArgument::Scroll(NativeScroll::HalfPageUp),
         help: "Scroll window half pages backwards (upwards)",
     },
     NativeActionDefinition {
         action: NativeAction::WindowPageDown,
         name: "vis-window-page-down",
         handler: NativeHandler::Wscroll,
-        argument: NativeArgument::Integer(2147483647),
+        argument: NativeArgument::Scroll(NativeScroll::PageDown),
         help: "Scroll window pages forwards (downwards)",
     },
     NativeActionDefinition {
         action: NativeAction::WindowPageUp,
         name: "vis-window-page-up",
         handler: NativeHandler::Wscroll,
-        argument: NativeArgument::Integer(-2147483647),
+        argument: NativeArgument::Scroll(NativeScroll::PageUp),
         help: "Scroll window pages backwards (upwards)",
     },
     NativeActionDefinition {
         action: NativeAction::WindowSlideDown,
         name: "vis-window-slide-down",
         handler: NativeHandler::Wslide,
-        argument: NativeArgument::Integer(1),
+        argument: NativeArgument::Scroll(NativeScroll::SlideDown),
         help: "Slide window content downwards",
     },
     NativeActionDefinition {
         action: NativeAction::WindowSlideUp,
         name: "vis-window-slide-up",
         handler: NativeHandler::Wslide,
-        argument: NativeArgument::Integer(-1),
+        argument: NativeArgument::Scroll(NativeScroll::SlideUp),
         help: "Slide window content upwards",
     },
 ];
@@ -2013,9 +2030,6 @@ impl NativeAction {
         use NativeHandler as H;
         use NativeMotion as M;
         match (self.definition().handler, self.definition().argument) {
-            (H::Wscroll | H::Wslide, _) => {
-                NativeSupport::Unsupported("requires the host viewport scroll engine")
-            }
             (
                 H::Movement,
                 A::Motion(
@@ -2057,9 +2071,6 @@ impl NativeAction {
             }
             (H::Operator | H::Delete, _) => NativeSupport::Conditional(
                 "native operators currently require normal, visual, or operator mode",
-            ),
-            (H::SelectionsNavigate, _) => NativeSupport::Conditional(
-                "single-selection fallback needs genuine half-page scrolling",
             ),
             (H::Call, A::Call(NativeCall::InsertNewline | NativeCall::InsertTab)) => {
                 NativeSupport::Conditional(
@@ -2104,9 +2115,13 @@ impl Editor {
                 if jump {
                     self.jumplist_save();
                 }
+                if !matches!(motion, NativeMotion::LineUp | NativeMotion::LineDown) {
+                    self.request_centered_follow();
+                }
                 return Ok(action);
             }
             (H::Window, A::Window(window)) => return self.native_window(window),
+            (H::Wscroll | H::Wslide, A::Scroll(scroll)) => return self.native_scroll(scroll),
             (H::Call, A::Call(NativeCall::Redraw)) => return Ok(EditorAction::Continue),
             (H::Jumplist, A::Integer(advance)) => {
                 let advance = isize::try_from(advance)
@@ -2217,6 +2232,7 @@ impl Editor {
                     .collect();
                 let action = self.finish_motion(target, false, true)?;
                 self.jumplist_save();
+                self.request_centered_follow();
                 return Ok(action);
             }
             (H::Insertmode | H::Replacemode, A::Motion(movement)) => {
@@ -2468,10 +2484,14 @@ impl Editor {
             }
             (H::SelectionsNavigate, A::Integer(direction)) => {
                 if self.selections().len() == 1 {
-                    return Err(Self::native_unsupported(
-                        action,
-                        "single-selection navigation needs genuine half-page scrolling",
-                    ));
+                    // Native `ka_selections_navigate` hands a single selection
+                    // to the scroll action.
+                    let scroll = if direction < 0 {
+                        NativeScroll::ScrollUp
+                    } else {
+                        NativeScroll::ScrollDown
+                    };
+                    return self.native_scroll(scroll);
                 }
                 let count = self.take_count() as isize;
                 self.selection_set
@@ -2849,6 +2869,166 @@ impl Editor {
         };
         self.request_scroll(top);
         Ok(EditorAction::Continue)
+    }
+    /// Native `view_scroll_page_up`, `view_scroll_page_down`,
+    /// `view_scroll_halfpage_up`, `view_scroll_halfpage_down`,
+    /// `view_slide_up`, `view_slide_down` and the plain `view_scroll_up` /
+    /// `view_scroll_down`. The native view counts display lines, this port
+    /// counts soft-wrapped rows; every rule below mirrors the native one.
+    fn native_scroll(&mut self, scroll: NativeScroll) -> Result<EditorAction, EditorError> {
+        let viewport = self.viewport;
+        let columns = viewport.width.max(1);
+        let height = viewport.height.max(1);
+        let tab_width = self.tab_width;
+        let data = self.text.to_vec();
+        let last = last_row(&data, columns, tab_width);
+        let top = viewport.top.min(last);
+        let (cursor_row, cursor_column) = screen_position(&data, self.cursor, columns, tab_width);
+        let row_begin = |row: usize| -> usize {
+            row_start(&data, row, columns, tab_width).unwrap_or(data.len())
+        };
+        let row_position = |row: usize, column: usize| -> usize {
+            position_at(&data, row, column, columns, tab_width).unwrap_or(data.len())
+        };
+        // The view can only scroll while a row exists below the visible body.
+        let can_scroll_down = top.saturating_add(height) <= last;
+        let mut new_top = top;
+        let mut cursor: Option<usize> = None;
+        match scroll {
+            NativeScroll::PageUp => {
+                if top == 0 {
+                    cursor = Some(0);
+                } else {
+                    // Native `view_redraw_bottom` scrolls a page up and keeps
+                    // the row above the old top at the bottom of the page.
+                    let previous = top - 1;
+                    new_top = top.saturating_sub(height);
+                    while previous >= new_top.saturating_add(height) {
+                        new_top += 1;
+                    }
+                    cursor = Some(row_begin(previous));
+                }
+            }
+            NativeScroll::PageDown => {
+                if can_scroll_down {
+                    new_top = top + height;
+                    cursor = Some(row_begin(new_top));
+                } else {
+                    cursor = Some(data.len());
+                }
+            }
+            NativeScroll::HalfPageUp => {
+                if top == 0 {
+                    cursor = Some(0);
+                } else {
+                    // Native `view_redraw_center` centers the row above the
+                    // old top and keeps it selected.
+                    let previous = top - 1;
+                    new_top = previous.saturating_sub(height / 2);
+                    let index = previous - new_top;
+                    if index < height / 2 {
+                        new_top = new_top.saturating_sub(height / 2 - index);
+                    }
+                    if previous < new_top {
+                        new_top = previous;
+                    }
+                    cursor = Some(row_begin(previous));
+                }
+            }
+            NativeScroll::HalfPageDown => {
+                if can_scroll_down {
+                    let end_row = top + height;
+                    new_top = top + height / 2;
+                    // Native `view_scroll_halfpage_down` selects the byte
+                    // where the old view ended, when the file reaches that far.
+                    cursor = Some(if end_row <= last {
+                        row_begin(end_row)
+                    } else {
+                        row_begin(new_top)
+                    });
+                } else {
+                    cursor = Some(data.len());
+                }
+            }
+            NativeScroll::SlideUp => {
+                let count = self.combined_count()?.max(1);
+                if can_scroll_down {
+                    new_top = top + count.min(height);
+                    if cursor_row == top {
+                        // The cursor sat on the first visible row and follows
+                        // the content.
+                        cursor = Some(row_position(new_top, cursor_column));
+                    }
+                } else if cursor_row + 1 < top + height {
+                    // Without content below, native slides the cursor down.
+                    cursor = Some(row_position(cursor_row + 1, cursor_column));
+                }
+            }
+            NativeScroll::SlideDown => {
+                let count = self.combined_count()?.max(1);
+                if top > 0 {
+                    new_top = top.saturating_sub(count);
+                    if cursor_row + 1 == top + height {
+                        // The cursor sat on the last visible row and follows
+                        // the content.
+                        let row = (new_top + height - 1).min(last);
+                        cursor = Some(row_position(row, cursor_column));
+                    }
+                } else if cursor_row > 0 {
+                    // At the top, native slides the cursor up.
+                    cursor = Some(row_position(cursor_row - 1, cursor_column));
+                }
+            }
+            NativeScroll::ScrollUp => {
+                let count = self.combined_count()?.max(1);
+                if top > 0 {
+                    new_top = top.saturating_sub(count);
+                    if cursor_row + 1 == top + height {
+                        let row = (new_top + height - 1).min(last);
+                        cursor = Some(row_position(row, cursor_column));
+                    }
+                } else {
+                    cursor = Some(0);
+                }
+            }
+            NativeScroll::ScrollDown => {
+                let count = self.combined_count()?.max(1);
+                if can_scroll_down {
+                    new_top = top + count.min(height);
+                    if cursor_row < new_top {
+                        cursor = Some(row_begin(new_top));
+                    }
+                } else {
+                    cursor = Some(data.len());
+                }
+            }
+        }
+        if let Some(cursor) = cursor {
+            self.set_primary_cursor(cursor)?;
+        }
+        self.request_scroll(new_top);
+        Ok(EditorAction::Continue)
+    }
+    /// Move the primary cursor without touching the other selections. Native
+    /// `cursor_set` keeps the anchor of a visual selection.
+    fn set_primary_cursor(&mut self, cursor: usize) -> Result<(), EditorError> {
+        let data = self.text.to_vec();
+        let cursor = cursor.min(data.len());
+        self.selection_set
+            .replace_primary(
+                &data,
+                Selection {
+                    anchor: if self.is_visual() {
+                        self.anchor
+                    } else {
+                        cursor
+                    },
+                    cursor,
+                },
+            )
+            .map_err(|e| EditorError(e.to_string()))?;
+        self.sync_set_to_primary();
+        Ok(())
     }
     fn native_view_motion(&mut self, movement: NativeMotion) -> Result<EditorAction, EditorError> {
         use NativeMotion as M;
@@ -3261,6 +3441,14 @@ mod argument_contract_tests {
                 NativeArgument::Window(value) => {
                     format!(".w = view_redraw_{}", snake(value).to_ascii_lowercase())
                 }
+                NativeArgument::Scroll(value) => match value {
+                    NativeScroll::PageDown => ".i = +PAGE".into(),
+                    NativeScroll::PageUp => ".i = -PAGE".into(),
+                    NativeScroll::HalfPageDown => ".i = +PAGE_HALF".into(),
+                    NativeScroll::HalfPageUp => ".i = -PAGE_HALF".into(),
+                    NativeScroll::SlideDown | NativeScroll::ScrollDown => ".i = +1".into(),
+                    NativeScroll::SlideUp | NativeScroll::ScrollUp => ".i = -1".into(),
+                },
                 NativeArgument::Info(value) => format!(
                     ".i = VIS_ACTION_{}_INFO",
                     if value == NativeInfo::Utf8 {
