@@ -6460,14 +6460,15 @@ impl Editor {
         if !self.prompt_insert {
             if matches!(self.pending, Pending::MacroPlay) {
                 self.pending = Pending::None;
-                return match key {
-                    Key::Char(':') if self.register(':').is_none_or(|r| r.bytes.is_empty()) => {
-                        Ok(EditorAction::Continue)
-                    }
-                    _ => Err(EditorError(
-                        "macro execution in a modal prompt is not implemented yet".into(),
-                    )),
+                let name = match key {
+                    Key::Char('@') => self
+                        .last_macro
+                        .ok_or_else(|| EditorError("no previous macro".into()))?,
+                    Key::Char(name) => name,
+                    _ => return Err(EditorError("macro register expected".into())),
                 };
+                let count = self.take_count();
+                return self.play_macro(name, count);
             }
             match key {
                 Key::Escape | Key::Ctrl('[') | Key::Ctrl('c') | Key::Enter => {}
@@ -6479,6 +6480,9 @@ impl Editor {
                 Key::Char('k') => key = Key::Up,
                 Key::Char('@') => {
                     self.pending = Pending::MacroPlay;
+                    return Ok(EditorAction::Continue);
+                }
+                Key::Char(c) if self.digit(c)? => {
                     return Ok(EditorAction::Continue);
                 }
                 Key::Up | Key::Down => {}
@@ -7661,6 +7665,9 @@ impl Editor {
                 .register(':')
                 .map(|r| String::from_utf8_lossy(&r.bytes).into_owned())
                 .unwrap_or_default();
+            if command.is_empty() {
+                return Ok(EditorAction::Continue);
+            }
             let mut action = EditorAction::Continue;
             for _ in 0..count {
                 action = self.execute_command(&command)?;
@@ -8094,6 +8101,33 @@ mod tests {
         escape(&mut e);
         assert_eq!(e.mode, Mode::Normal);
         assert_eq!(e.text.to_vec(), b"one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn modal_prompt_replays_macro_registers_with_counts() {
+        let mut e = editor(b"one\n");
+        keys(&mut e, "qa");
+        keys(&mut e, "ix");
+        escape(&mut e);
+        keys(&mut e, "q");
+        assert_eq!(e.text.to_vec(), b"xone\n");
+
+        keys(&mut e, ":");
+        escape(&mut e);
+        assert_eq!(e.mode, Mode::Command);
+        assert!(!e.prompt_insert);
+        keys(&mut e, "2@a");
+        assert_eq!(e.command, "xx");
+        assert_eq!(e.mode, Mode::Command);
+        assert!(!e.prompt_insert);
+
+        keys(&mut e, "@@");
+        assert_eq!(e.command, "xxx");
+        assert_eq!(e.mode, Mode::Command);
+
+        escape(&mut e);
+        assert_eq!(e.mode, Mode::Normal);
+        assert_eq!(e.text.to_vec(), b"xone\n");
     }
 
     #[test]

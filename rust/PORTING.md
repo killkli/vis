@@ -738,3 +738,17 @@ previous three fixture failures are gone. The library tests cover diagnostic
 commit plus undo, strict rejection, register and stable-mark survival, shell
 observer cleanup, and conflict/parse rollback. Full default-feature tests,
 strict Clippy and formatting pass.
+
+## Prompt macro and default binding checkpoint (2026-10-26, macOS arm64)
+
+The modal prompt now accepts counts and replays macro registers with `@` and the
+last register with `@@`, using the same replay depth and work limits as normal
+mode. Replayed insert keys edit the prompt text without submitting it, and an
+empty command register is a consumed no-op. The native `g0` default binding now
+routes to `CURSOR_SCREEN_LINE_BEGIN`; it was previously parsed as an unsupported
+`g` motion. Wrapped rows therefore move to the row start, not the file line
+start.
+
+Verification: focused editor and viewport tests cover macro insertion, counted
+repetition, last-register replay and wrapped-row `g0`; strict Clippy and
+formatting pass.
