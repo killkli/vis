@@ -25,13 +25,14 @@ C_ORACLE = r'''
 #include MAIN_PATH
 #undef main
 int main(int argc, char **argv) {
-    if (argc != 4) return 2;
+    if (argc != 6) return 2;
     if (!setlocale(LC_ALL, "C.UTF-8")) setlocale(LC_ALL, "en_US.UTF-8");
     Vis session = {0}; Win win = {.vis = &session};
     Text *txt = vis_text_load(&session, 0, TEXT_LOAD_READ);
     if (!txt || !text_insert(&session, txt, 0, argv[1], strlen(argv[1]))) return 3;
     View *view = &win.view;
-    view->text = txt; view->tabwidth = atoi(argv[3]); view->breakat = "";
+    view->text = txt; view->tabwidth = atoi(argv[3]); view->breakat = argv[4];
+    view->wrapcolumn = atoi(argv[5]);
     if (!vis_view_resize(view, atoi(argv[2]), 512)) return 4;
     for (size_t pos = 0; pos <= strlen(argv[1]); pos++) {
         int row = -1, column = -1;
@@ -46,10 +47,15 @@ RUST_DRIVER = r'''
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let data = args[1].as_bytes();
-    let width = args[2].parse().unwrap();
-    let tab_width = args[3].parse().unwrap();
+    let width: usize = args[2].parse().unwrap();
+    let tab_width: usize = args[3].parse().unwrap();
+    let breakat = &args[4];
+    let wrapcolumn: usize = args[5].parse().unwrap();
+    let wrap_columns = if wrapcolumn == 0 { width } else { width.min(wrapcolumn) };
     for pos in 0..=data.len() {
-        let (row, column) = vis::terminal::screen_position(data, pos, width, tab_width);
+        let (row, column) = vis::view::screen_position_with_layout(
+            data, pos, width, wrap_columns, tab_width, breakat,
+        );
         print!("{pos}:{row}:{column} ");
     }
     println!();
@@ -57,8 +63,10 @@ fn main() {
 '''
 
 
-def coordinates(binary, text, width, tab_width):
-    output = subprocess.check_output([str(binary), text, str(width), str(tab_width)], timeout=5)
+def coordinates(binary, text, width, tab_width, breakat="", wrapcolumn=0):
+    output = subprocess.check_output(
+        [str(binary), text, str(width), str(tab_width), breakat, str(wrapcolumn)], timeout=5
+    )
     return {position: (row, column) for position, row, column in
             (map(int, entry.split(b":")) for entry in output.split())}
 
@@ -150,6 +158,28 @@ def main():
                                 failures.append((text, width, tab_width, position, expected[position], actual[position]))
                         else:
                             failures.append((text, width, tab_width, position, expected[position], actual[position]))
+        custom_wrap_cases = [
+            ("aa bb-cc/dd ee", " -/", 0),
+            ("alpha,beta.gamma:delta", ",.:", 6),
+            ("one_two three-four", "_ -", 4),
+            ("wide界-char words", " -", 5),
+            ("base\nnext-line words", " -", 4),
+        ]
+        for text, breakat, wrapcolumn in custom_wrap_cases:
+            positions, offset = [0], 0
+            for character in text:
+                offset += len(character.encode())
+                positions.append(offset)
+            for width in [5, 9, 13]:
+                for tab_width in [4, 8]:
+                    expected = coordinates(c_driver, text, width, tab_width, breakat, wrapcolumn)
+                    actual = coordinates(rust_driver, text, width, tab_width, breakat, wrapcolumn)
+                    for position in positions:
+                        if expected[position] == actual[position]:
+                            equal += 1
+                        else:
+                            failures.append((text, width, tab_width, breakat, wrapcolumn,
+                                             position, expected[position], actual[position]))
     print(f"View coordinates: {equal} equal; {sum(known.values())} documented C quirks; {len(failures)} unknown differences")
     for name, count in known.items():
         print(f"  {name}: {count}")
