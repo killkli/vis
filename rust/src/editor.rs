@@ -3686,7 +3686,20 @@ impl Editor {
             && !matches!(
                 key,
                 Key::Char(
-                    'g' | 'f' | 'F' | 't' | 'T' | ';' | ',' | '"' | '/' | '?' | 'H' | 'M' | 'L'
+                    'g' | 'f'
+                        | 'F'
+                        | 't'
+                        | 'T'
+                        | ';'
+                        | ','
+                        | '"'
+                        | '/'
+                        | '?'
+                        | 'H'
+                        | 'M'
+                        | 'L'
+                        | '['
+                        | ']'
                 )
             )
         {
@@ -3705,11 +3718,15 @@ impl Editor {
                 let name = std::mem::replace(&mut self.selected_mark, '\'');
                 self.save_selection_mark(name)?;
             }
-            // The selections table precedes the motions table, so normal-mode
-            // `M` restores the selection mark; window-middle is action-only.
-            Key::Char('M') => {
+            // The selections table precedes the motions table, so normal and
+            // visual `M` restore the selection mark. Operator-pending mode
+            // only has the motions table, so there `M` is window middle.
+            Key::Char('M') if self.operator.is_none() => {
                 let name = std::mem::replace(&mut self.selected_mark, '\'');
                 self.restore_selection_mark(name, false)?;
+            }
+            Key::Char('M') => {
+                return self.invoke_native_action(NativeAction::CursorWindowLineMiddle);
             }
             Key::Char('H') => return self.invoke_native_action(NativeAction::CursorWindowLineTop),
             Key::Char('L') => {
@@ -4033,33 +4050,12 @@ impl Editor {
                 self.jumplist_save();
             }
             Key::Char('*' | '#') => {
-                let data = self.text.to_vec();
-                let range = motion::word_object(&data, self.cursor, false, false);
-                if range.start > range.end || range.end > data.len() {
-                    return Err(EditorError("no word at cursor".into()));
-                }
-                let word = &data[range];
-                self.word_search = Some(word.to_vec());
-                self.search = Self::escape_pattern(word);
-                self.search_backwards = key == Key::Char('#');
-                self.session
-                    .set_previous_regex(&self.search)
-                    .map_err(|e| EditorError(e.to_string()))?;
-                self.registers.insert(
-                    '/',
-                    Register {
-                        bytes: self.search.as_bytes().to_vec(),
-                        linewise: false,
-                    },
-                );
-                let next = if key == Key::Char('*') {
-                    motion::word_find_next(&data, motion::char_next(&data, self.cursor), word)
-                } else {
-                    motion::word_find_prev(&data, self.cursor, word)
-                };
-                if let Some(range) = next {
-                    self.cursor = range.start;
-                    self.request_centered_follow();
+                let backwards = key == Key::Char('#');
+                if let Some(target) = self.word_search_target(backwards)? {
+                    if target != self.cursor {
+                        self.cursor = target;
+                        self.request_centered_follow();
+                    }
                 }
                 self.jumplist_save();
             }
@@ -4271,6 +4267,24 @@ impl Editor {
             }
             self.count = None;
             return Ok(Some((pos, false, true, true)));
+        }
+        if self.operator.is_some() {
+            match key {
+                Key::Char('n' | 'N') => {
+                    let backwards = self.search_backwards ^ (key == Key::Char('N'));
+                    for _ in 0..count {
+                        pos = self.search_target(pos, backwards)?.unwrap_or(pos);
+                    }
+                    return Ok(Some((pos, false, false, false)));
+                }
+                Key::Char('*' | '#') => {
+                    pos = self
+                        .word_search_target(key == Key::Char('#'))?
+                        .unwrap_or(pos);
+                    return Ok(Some((pos, false, false, false)));
+                }
+                _ => {}
+            }
         }
         if key == Key::Char('G') {
             // G without a count is native FILE_END (LINEWISE_INCLUSIVE);
@@ -6521,23 +6535,22 @@ impl Editor {
         Ok(EditorAction::Continue)
     }
 
-    fn search_motion(&mut self, backwards: bool) -> Result<(), EditorError> {
+    /// Target of the native `n`/`N` search motion. No previous pattern is a
+    /// consumed no-op, like the native motion returning its origin.
+    fn search_target(&self, from: usize, backwards: bool) -> Result<Option<usize>, EditorError> {
         if let Some(word) = &self.word_search {
             let data = self.text.to_vec();
             let found = if backwards {
-                motion::word_find_prev(&data, self.cursor, word)
+                motion::word_find_prev(&data, from, word)
                     .or_else(|| motion::word_find_prev(&data, data.len(), word))
             } else {
-                motion::word_find_next(&data, motion::char_next(&data, self.cursor), word)
+                motion::word_find_next(&data, motion::char_next(&data, from), word)
                     .or_else(|| motion::word_find_next(&data, 0, word))
             };
-            self.cursor = found
-                .ok_or_else(|| EditorError("word not found".into()))?
-                .start;
-            return Ok(());
+            return Ok(found.map(|range| range.start));
         }
         if self.search.is_empty() {
-            return Err(EditorError("no previous search".into()));
+            return Ok(None);
         }
         let regex = self.search_regex(&self.search)?;
         let data = self.text.to_vec();
@@ -6551,7 +6564,7 @@ impl Editor {
                 let Some(next) = next else {
                     break;
                 };
-                if next.range.start < self.cursor {
+                if next.range.start < from {
                     found = Some(next.range.start);
                 } else if found.is_some() {
                     break;
@@ -6580,7 +6593,7 @@ impl Editor {
                 }
             }
         } else {
-            let start = motion::char_next(&data, self.cursor);
+            let start = motion::char_next(&data, from);
             found = regex
                 .find_with_flags(&data, start..data.len(), start > 0, false)
                 .map_err(|e| EditorError(e.to_string()))?
@@ -6592,8 +6605,46 @@ impl Editor {
                     .map(|m| m.range.start);
             }
         }
-        self.cursor = found.ok_or_else(|| EditorError("pattern not found".into()))?;
+        Ok(found)
+    }
+
+    fn search_motion(&mut self, backwards: bool) -> Result<(), EditorError> {
+        if let Some(target) = self.search_target(self.cursor, backwards)? {
+            self.cursor = target;
+        }
         Ok(())
+    }
+
+    /// Resolve the native `*`/`#` word search, updating the search state, and
+    /// return its target or `None` when the cursor is not on a word.
+    fn word_search_target(&mut self, backwards: bool) -> Result<Option<usize>, EditorError> {
+        let data = self.text.to_vec();
+        let range = motion::word_object(&data, self.cursor, false, false);
+        if range.start > range.end || range.end > data.len() {
+            return Ok(None);
+        }
+        let word = &data[range];
+        self.word_search = Some(word.to_vec());
+        self.search = Self::escape_pattern(word);
+        self.search_backwards = backwards;
+        self.session
+            .set_previous_regex(&self.search)
+            .map_err(|e| EditorError(e.to_string()))?;
+        self.registers.insert(
+            '/',
+            Register {
+                bytes: self.search.as_bytes().to_vec(),
+                linewise: false,
+            },
+        );
+        let found = if backwards {
+            motion::word_find_prev(&data, self.cursor, word)
+                .or_else(|| motion::word_find_prev(&data, data.len(), word))
+        } else {
+            motion::word_find_next(&data, motion::char_next(&data, self.cursor), word)
+                .or_else(|| motion::word_find_next(&data, 0, word))
+        };
+        Ok(found.map(|range| range.start))
     }
 
     fn escape_pattern(bytes: &[u8]) -> String {
