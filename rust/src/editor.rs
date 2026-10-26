@@ -3755,9 +3755,12 @@ impl Editor {
                 };
             }
             Key::Char(';' | ',') => {
-                let mut find = self
-                    .last_find
-                    .ok_or_else(|| EditorError("no previous character search".into()))?;
+                let Some(mut find) = self.last_find else {
+                    // Native find-repeat actions consume this key without
+                    // cancelling visual or operator-pending state when no
+                    // previous character search exists.
+                    return Ok(EditorAction::Continue);
+                };
                 if key == Key::Char(',') {
                     find.backwards = !find.backwards;
                 }
