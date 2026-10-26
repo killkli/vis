@@ -1897,6 +1897,7 @@ fn sidebar_columns(
 }
 
 /// The number of every visible row, honouring the native relative numbering.
+#[allow(clippy::too_many_arguments)]
 fn line_numbers(
     data: &[u8],
     top: usize,
@@ -2857,8 +2858,10 @@ mod tests {
             height: 4,
         };
         let mut viewport = Viewport::default();
-        let mut display = WindowDisplay::default();
-        display.numbers = true;
+        let display = WindowDisplay {
+            numbers: true,
+            ..WindowDisplay::default()
+        };
         let panel = viewport.panel_decorated(
             data,
             0,

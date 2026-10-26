@@ -89,7 +89,7 @@ impl Workspace {
                     .map_or((raw, false), |name| (name, true));
                 let value = equal_value.or_else(|| request.args.get(1).map(String::as_str));
                 self.apply_set_option(name, value, toggle, negate, request.window)?;
-                return Ok(EditorAction::Continue);
+                Ok(EditorAction::Continue)
             }
             H::Substitute => Err(invalid(
                 "substitution is unsupported; use x/pattern/ c/replacement/",
