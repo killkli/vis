@@ -125,9 +125,10 @@ remain explicit differences.
 
 Complete the original native action/option behavior and remaining view options
 and workspace structural commands. Language translation and window-local mapping
-commands are implemented with their physical-input and scope rules. A raw input pump for
-sessions without a controlling terminal remains distinct from the verified
-foreground/canonical terminal protocol. Verify startup geometry, persistent redraw
+commands are implemented with their physical-input and scope rules. Piped stdin
+now supplies keys when it was not consumed as document data, and EOF reopens
+`/dev/tty` or fails like the native editor; the native `-`/scratch path keeps
+reading keys from a tty. Verify startup geometry, persistent redraw
 styles, remaining automatic option overlays, file-name mutations and argument/error semantics
 against C. Passing the original eight Lua scripts is not complete API coverage.
 

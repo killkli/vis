@@ -428,8 +428,8 @@ impl InteractiveTerminal {
             Ok(())
         })
     }
-    fn initialize(&self) -> io::Result<()> {
-        let terminal = vis::terminal::Terminal::new()?;
+    fn initialize(&self, stdin_consumed: bool) -> io::Result<()> {
+        let terminal = vis::terminal::Terminal::new(stdin_consumed)?;
         *self.slot.borrow_mut() = Some(terminal);
         Ok(())
     }
@@ -893,6 +893,7 @@ fn run_interactive_session(
     } else {
         None
     };
+    let stdin_consumed = input.is_some();
 
     for (index, path) in paths
         .iter()
@@ -935,7 +936,7 @@ fn run_interactive_session(
     if host.workspace.borrow().window_count() == 0 {
         return Ok(host.exit_code().unwrap_or(0));
     }
-    terminal.initialize()?;
+    terminal.initialize(stdin_consumed)?;
     loop {
         let (quit, updated) = host.draw(terminal, &message)?;
         if let Some(updated) = updated {

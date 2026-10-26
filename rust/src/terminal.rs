@@ -378,8 +378,12 @@ impl Decoder {
 }
 
 pub struct Terminal {
-    tty: File,
-    original: Termios,
+    input: File,
+    output: File,
+    /// The controlling terminal used for termios and size queries. A piped
+    /// session starts without one and switches to it after stdin reaches EOF.
+    tty: Option<File>,
+    original: Option<Termios>,
     active: bool,
     size: (usize, usize),
     decoder: Decoder,
@@ -391,34 +395,63 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn new() -> io::Result<Self> {
-        // macOS poll does not support the /dev/tty alias. Resolve the actual
-        // terminal device first, without unsafe select or numeric descriptors.
-        let name = if io::stdin().is_terminal() {
-            rustix::termios::ttyname(io::stdin(), Vec::new())?
-        } else if io::stdout().is_terminal() {
-            rustix::termios::ttyname(io::stdout(), Vec::new())?
-        } else if io::stderr().is_terminal() {
-            rustix::termios::ttyname(io::stderr(), Vec::new())?
+    /// `stdin_consumed` marks the native `-`/scratch path which already read
+    /// stdin as document data. Keys then come from a tty instead of the drained
+    /// pipe. Otherwise a non-terminal stdin is the key source.
+    pub fn new(stdin_consumed: bool) -> io::Result<Self> {
+        // Native vis reads keys from stdin and draws to stderr. A non-terminal
+        // stdin therefore selects a plain pump before any controlling tty:
+        // scripts can feed keys through a pipe and are switched to /dev/tty
+        // only after that input reaches EOF.
+        let plain = if stdin_consumed || io::stdin().is_terminal() {
+            None
         } else {
-            // Pipelines and command substitution may redirect every standard
-            // stream while the process still has a controlling terminal.
-            let controlling = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
-            rustix::termios::ttyname(&controlling, Vec::new())?
+            File::open("/dev/stdin")
+                .and_then(|input| {
+                    OpenOptions::new()
+                        .write(true)
+                        .open("/dev/stderr")
+                        .map(|output| (input, output))
+                })
+                .ok()
         };
-        let tty = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(rustix::fs::OFlags::NOCTTY.bits() as _)
-            .open(Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())))?;
-        let original = tcgetattr(&tty)?;
-        let mut raw = original.clone();
-        raw.make_raw();
-        let size = terminal_size(&tty)?;
-        tcsetattr(&tty, OptionalActions::Now, &raw)?;
+        let (tty, input, output, original, size) = if let Some((input, output)) = plain {
+            let size = terminal_size(&output).unwrap_or((80, 24));
+            (None, input, output, None, size)
+        } else {
+            // macOS poll does not support the /dev/tty alias. Resolve the actual
+            // terminal device first, without unsafe select or numeric descriptors.
+            let name = if io::stdin().is_terminal() {
+                rustix::termios::ttyname(io::stdin(), Vec::new())?
+            } else if io::stdout().is_terminal() {
+                rustix::termios::ttyname(io::stdout(), Vec::new())?
+            } else if io::stderr().is_terminal() {
+                rustix::termios::ttyname(io::stderr(), Vec::new())?
+            } else {
+                // Command substitution may redirect every standard stream while
+                // the process still has a controlling terminal.
+                let controlling = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+                rustix::termios::ttyname(&controlling, Vec::new())?
+            };
+            let tty = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(rustix::fs::OFlags::NOCTTY.bits() as _)
+                .open(Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())))?;
+            let original = tcgetattr(&tty)?;
+            let mut raw = original.clone();
+            raw.make_raw();
+            let size = terminal_size(&tty)?;
+            tcsetattr(&tty, OptionalActions::Now, &raw)?;
+            let input = tty.try_clone()?;
+            let output = tty.try_clone()?;
+            (Some(tty), input, output, Some(original), size)
+        };
         // Construct the guard before entering the alternate screen, so even a
         // failed initial write restores the already-changed terminal settings.
         let mut terminal = Self {
+            input,
+            output,
             tty,
             original,
             active: true,
@@ -429,10 +462,39 @@ impl Terminal {
             escape_delay: ESCAPE_DELAY,
         };
         terminal
-            .tty
+            .output
             .write_all(b"\x1b[?1049h\x1b[?2004h\x1b[?25h\x1b[2J\x1b[H")?;
-        terminal.tty.flush()?;
+        terminal.output.flush()?;
         Ok(terminal)
+    }
+
+    /// The native input path reopens `/dev/tty` after stdin ends. Adopt that
+    /// terminal for termios and key input, keeping stderr as the display.
+    fn reopen_terminal(&mut self) -> io::Result<bool> {
+        if self.tty.is_some() {
+            return Ok(true);
+        }
+        let tty = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(rustix::fs::OFlags::NOCTTY.bits() as _)
+            .open("/dev/tty")
+        {
+            Ok(tty) => tty,
+            Err(error) if missing_terminal(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let original = tcgetattr(&tty)?;
+        let mut raw = original.clone();
+        raw.make_raw();
+        let input = tty.try_clone()?;
+        let size = terminal_size(&tty)?;
+        tcsetattr(&tty, OptionalActions::Now, &raw)?;
+        self.input = input;
+        self.tty = Some(tty);
+        self.original = Some(original);
+        self.size = size;
+        Ok(true)
     }
 
     pub fn dimensions(&self) -> (usize, usize) {
@@ -451,10 +513,12 @@ impl Terminal {
     }
 
     pub fn read_event(&mut self) -> io::Result<InputEvent> {
-        let size = terminal_size(&self.tty)?;
-        if size != self.size {
-            self.size = size;
-            return Ok(InputEvent::Resize);
+        if let Some(tty) = &self.tty {
+            let size = terminal_size(tty)?;
+            if size != self.size {
+                self.size = size;
+                return Ok(InputEvent::Resize);
+            }
         }
         loop {
             if self.decoder.is_escape() {
@@ -477,7 +541,7 @@ impl Terminal {
                 tv_sec: 0,
                 tv_nsec: delay.as_nanos() as _,
             };
-            let mut descriptors = [PollFd::new(&self.tty, PollFlags::IN)];
+            let mut descriptors = [PollFd::new(&self.input, PollFlags::IN)];
             match poll(&mut descriptors, Some(&timeout)) {
                 Ok(0) if self.decoder.is_escape() => continue,
                 Ok(0) => return Ok(InputEvent::Timeout),
@@ -492,11 +556,19 @@ impl Terminal {
                 return Err(io::Error::other("terminal input is unavailable"));
             }
             let mut bytes = [0u8; 4096];
-            match self.tty.read(&mut bytes) {
+            match self.input.read(&mut bytes) {
                 Ok(0) if self.decoder.paste.is_some() => {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
                         "unterminated bracketed paste",
+                    ));
+                }
+                Ok(0) if self.tty.is_none() => {
+                    if self.reopen_terminal()? {
+                        continue;
+                    }
+                    return Err(io::Error::other(
+                        "failed to reopen a terminal after stdin EOF",
                     ));
                 }
                 Ok(0) => return Ok(InputEvent::Eof),
@@ -555,7 +627,9 @@ impl Terminal {
         layout: Layout,
         message: &str,
     ) -> io::Result<Vec<ViewGeometry>> {
-        self.size = terminal_size(&self.tty)?;
+        if let Some(tty) = &self.tty {
+            self.size = terminal_size(tty)?;
+        }
         let frame = compose_views(
             &mut self.viewports,
             views,
@@ -564,8 +638,8 @@ impl Terminal {
             message,
             self.size,
         )?;
-        self.tty.write_all(frame.as_bytes())?;
-        self.tty.flush()?;
+        self.output.write_all(frame.as_bytes())?;
+        self.output.flush()?;
         Ok(self.geometries(views))
     }
 
@@ -585,7 +659,9 @@ impl Terminal {
         layout: Layout,
         message: &str,
     ) -> io::Result<Vec<ViewGeometry>> {
-        self.size = terminal_size(&self.tty)?;
+        if let Some(tty) = &self.tty {
+            self.size = terminal_size(tty)?;
+        }
         compose_views(
             &mut self.viewports,
             views,
@@ -634,7 +710,9 @@ impl Terminal {
         message: &str,
         decorations: &BTreeMap<usize, ViewDecorations>,
     ) -> io::Result<Vec<ViewGeometry>> {
-        self.size = terminal_size(&self.tty)?;
+        if let Some(tty) = &self.tty {
+            self.size = terminal_size(tty)?;
+        }
         let frame = compose_views_decorated(
             &mut self.viewports,
             views,
@@ -644,8 +722,8 @@ impl Terminal {
             self.size,
             decorations,
         )?;
-        self.tty.write_all(frame.as_bytes())?;
-        self.tty.flush()?;
+        self.output.write_all(frame.as_bytes())?;
+        self.output.flush()?;
         Ok(self.geometries(views))
     }
 
@@ -655,15 +733,17 @@ impl Terminal {
         if self.active {
             return Ok(());
         }
-        let mut raw = self.original.clone();
-        raw.make_raw();
-        tcsetattr(&self.tty, OptionalActions::Now, &raw)?;
+        if let (Some(tty), Some(original)) = (&self.tty, &self.original) {
+            let mut raw = original.clone();
+            raw.make_raw();
+            tcsetattr(tty, OptionalActions::Now, &raw)?;
+            self.size = terminal_size(tty)?;
+        }
         self.active = true;
         self.escape_since = None;
-        self.size = terminal_size(&self.tty)?;
-        self.tty
+        self.output
             .write_all(b"\x1b[?1049h\x1b[?2004h\x1b[?25h\x1b[2J\x1b[H")?;
-        self.tty.flush()
+        self.output.flush()
     }
 
     /// Restore terminal settings even if restoring screen output fails.
@@ -672,11 +752,15 @@ impl Terminal {
             return Ok(());
         }
         let output = self
-            .tty
+            .output
             .write_all(b"\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l")
-            .and_then(|()| self.tty.flush());
-        let settings =
-            tcsetattr(&self.tty, OptionalActions::Now, &self.original).map_err(io::Error::from);
+            .and_then(|()| self.output.flush());
+        let settings = match (&self.tty, &self.original) {
+            (Some(tty), Some(original)) => {
+                tcsetattr(tty, OptionalActions::Now, original).map_err(io::Error::from)
+            }
+            _ => Ok(()),
+        };
         if settings.is_ok() {
             self.active = false;
         }
@@ -688,6 +772,16 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.restore();
     }
+}
+
+fn missing_terminal(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == rustix::io::Errno::NXIO.raw_os_error()
+                || code == rustix::io::Errno::NODEV.raw_os_error()
+                || code == rustix::io::Errno::NOTTY.raw_os_error()
+    ) || error.kind() == io::ErrorKind::NotFound
 }
 
 fn terminal_size(tty: &File) -> io::Result<(usize, usize)> {

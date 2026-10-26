@@ -174,9 +174,13 @@ The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
 Running shell process groups respond to external SIGINT/SIGTERM with bounded
 TERM/KILL escalation and pipe cleanup. Foreground terminal handoff restores
-canonical input for synchronous children and permits physical Ctrl-C. A raw
-input pump for sessions without a controlling terminal still needs work. Bracketed paste stays literal;
-file bytes, paths and messages cannot inject terminal control sequences.
+canonical input for synchronous children and permits physical Ctrl-C. When stdin
+is not a terminal and was not consumed as document data, input is read directly
+from the stdin pipe and frames are written to stderr; EOF reopens `/dev/tty` or
+fails like the native editor. When stdin was the native `-`/scratch document,
+keys come from the available tty instead of the drained pipe. Bracketed paste
+stays literal; file bytes, paths and messages cannot inject terminal control
+sequences.
 
 Optional Lua configuration, live userdata, reentrant registered callbacks,
 function mappings and syntax styles are now implemented; see
@@ -766,3 +770,20 @@ their specific errors.
 Verification: the editor unit test for an unbound `!` asserts unchanged text and
 a consumed `Continue`, and the language-map test keeps its disabled-translation
 non-move as a consumed key before the next mapped key moves. Library tests pass.
+
+## Piped terminal checkpoint (2026-10-26, macOS arm64)
+
+The terminal backend now has an input pump for sessions without a controlling
+terminal. When stdin is not a tty and was not consumed as document data, it reads
+raw keys from stdin, writes frames to stderr and uses the stderr geometry when
+available (otherwise 80x24). At EOF it reopens `/dev/tty`, switches termios to
+raw mode and continues; when no terminal can be reopened it fails like native
+rather than reporting a clean EOF. The native `-` and implicit scratch paths
+already consumed stdin as document bytes, so they deliberately skip the pipe and
+read keys from stdout/stderr or the controlling terminal.
+
+Verification: two new integration tests run `vis-rs file` with piped `:q!` and
+with empty stdin, asserting a clean exit with unchanged bytes and the native
+reopen failure. An actual paced pipe edit (`iX`, Escape, `:wq`) saves `Xabc`
+identically under C vis and Rust. GNU screen-style PTY tests still exercise the
+ordinary termios path and terminal restoration.
