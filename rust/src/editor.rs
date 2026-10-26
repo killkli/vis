@@ -561,6 +561,9 @@ pub struct Editor {
     /// Body geometry the UI last measured for the focused window. Until a
     /// frame is drawn this keeps native vis's 80x23 no-terminal defaults.
     viewport: crate::view::ViewportMetrics,
+    /// First display row the next frame should show, set by scroll actions.
+    /// Consumed after one render so later cursor motions auto-follow again.
+    scroll_request: Option<usize>,
     buffer_state: BufferState,
     selected_mark: char,
     session: sam::Session,
@@ -656,6 +659,7 @@ impl Editor {
                 height: 23,
                 top: 0,
             },
+            scroll_request: None,
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -1850,6 +1854,20 @@ impl Editor {
 
     pub fn viewport(&self) -> crate::view::ViewportMetrics {
         self.viewport
+    }
+
+    /// Ask the next frame to start at a given display row. The request is
+    /// one-shot: the workspace clears it after rendering.
+    pub fn request_scroll(&mut self, top: usize) {
+        self.scroll_request = Some(top);
+    }
+
+    pub fn scroll_request(&self) -> Option<usize> {
+        self.scroll_request
+    }
+
+    pub fn clear_scroll_request(&mut self) {
+        self.scroll_request = None;
     }
 
     /// Native `vis_jumplist(vis, advance)`: save, or move once through the ring
@@ -3326,6 +3344,9 @@ impl Editor {
             Pending::G => return self.g_key(key),
             Pending::Z => {
                 return match key {
+                    Key::Char('t') => self.invoke_native_action(NativeAction::WindowRedrawTop),
+                    Key::Char('z') => self.invoke_native_action(NativeAction::WindowRedrawCenter),
+                    Key::Char('b') => self.invoke_native_action(NativeAction::WindowRedrawBottom),
                     Key::Char('Z') => Ok(EditorAction::Save {
                         quit: true,
                         force: false,
@@ -3791,7 +3812,7 @@ impl Editor {
                 }
                 self.jumplist_save();
             }
-            Key::Char('Z') => self.pending = Pending::Z,
+            Key::Char('z' | 'Z') => self.pending = Pending::Z,
             Key::Char('q') => self.pending = Pending::MacroRecord,
             Key::Char('@') => self.pending = Pending::MacroPlay,
             Key::Ctrl('w') => self.pending = Pending::Window,

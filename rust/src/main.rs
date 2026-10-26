@@ -743,6 +743,7 @@ impl InteractiveHost {
         let geometry =
             terminal.with(|terminal| terminal.render_views(&views, active, layout, message))?;
         self.publish_geometry(&geometry);
+        self.workspace.borrow_mut().clear_scroll_requests();
         Ok(false)
     }
 
@@ -780,6 +781,7 @@ fn render_views(frames: &[vis::workspace::Frame]) -> Vec<vis::terminal::RenderVi
             prompt: None,
             display: frame.display,
             prompt_executing: frame.prompt_executing,
+            topline: frame.topline,
             tab_width: frame.tab_width,
         })
         .collect()

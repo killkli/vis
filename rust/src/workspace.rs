@@ -215,6 +215,8 @@ pub struct Frame {
     pub display: WindowDisplay,
     pub prompt_executing: bool,
     pub tab_width: usize,
+    /// First display row the next frame should show (one-shot scroll request).
+    pub topline: Option<usize>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -522,9 +524,19 @@ impl Workspace {
                     } else {
                         window.view.tab_width
                     },
+                    topline: if active {
+                        self.editor.scroll_request()
+                    } else {
+                        None
+                    },
                 }
             })
             .collect()
+    }
+
+    /// Clear one-shot scroll requests after their frame has been composed.
+    pub fn clear_scroll_requests(&mut self) {
+        self.editor.clear_scroll_request();
     }
 
     pub fn handle_key(&mut self, key: Key) -> io::Result<Outcome> {

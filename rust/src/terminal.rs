@@ -51,6 +51,8 @@ pub struct RenderView<'a> {
     pub tab_width: usize,
     pub display: WindowDisplay,
     pub prompt_executing: bool,
+    /// First display row to show for this frame, before cursor auto-follow.
+    pub topline: Option<usize>,
     /// Full prompt including its `:`, `/` or `?` prefix.
     pub prompt: Option<&'a str>,
 }
@@ -517,6 +519,7 @@ impl Terminal {
                 tab_width: editor.tab_width,
                 display: WindowDisplay::default(),
                 prompt_executing: false,
+                topline: None,
                 prompt: prompt.as_deref(),
             }],
             0,
@@ -1184,6 +1187,7 @@ fn compose_views_decorated(
             decorations.get(&view.id),
             view.display,
             &overlay,
+            view.topline,
         );
         let body = region
             .height
@@ -1316,6 +1320,7 @@ impl Viewport {
             None,
             WindowDisplay::default(),
             &OverlayContext::default(),
+            None,
         )
     }
 
@@ -1333,6 +1338,7 @@ impl Viewport {
         decorations: Option<&ViewDecorations>,
         display: WindowDisplay,
         overlay: &OverlayContext,
+        requested_top: Option<usize>,
     ) -> PanelFrame {
         let (columns, rows) = (region.width, region.height);
         let body = rows.saturating_sub(usize::from(display.statusbar));
@@ -1344,11 +1350,17 @@ impl Viewport {
                 .saturating_sub(body.saturating_sub(previous.height));
         }
         let (cursor_row, cursor_column) = wrapped_cursor(data, cursor, columns, tab_width);
-        if cursor_row < self.top {
-            self.top = cursor_row;
-        }
-        if body > 0 && cursor_row >= self.top.saturating_add(body) {
-            self.top = cursor_row + 1 - body;
+        if let Some(top) = requested_top {
+            // Scroll actions place the cursor where the user will see it; do
+            // not pull the view back, only clamp to the last row that exists.
+            self.top = top.min(crate::view::last_row(data, columns, tab_width));
+        } else {
+            if cursor_row < self.top {
+                self.top = cursor_row;
+            }
+            if body > 0 && cursor_row >= self.top.saturating_add(body) {
+                self.top = cursor_row + 1 - body;
+            }
         }
         let mut fallback = ViewDecorations::default();
         if decorations.is_none() && overlay.native_view && prompt.is_none() {
@@ -2060,6 +2072,7 @@ mod tests {
             tab_width: 8,
             display: WindowDisplay::default(),
             prompt_executing: false,
+            topline: None,
             prompt: None,
         }
     }
@@ -2584,6 +2597,54 @@ mod tests {
         assert_eq!(viewports.len(), 1);
         assert!(viewports.contains_key(&2));
         assert!(compose_views(&mut viewports, &[], 2, Layout::Horizontal, "", (1, 1)).is_err());
+    }
+
+    #[test]
+    fn requested_topline_starts_the_frame_there_and_still_follows_the_cursor() {
+        let mut viewport = Viewport::default();
+        let data = b"a\nb\nc\nd\n";
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 3,
+        };
+        let panel = viewport.panel_decorated(
+            data,
+            0,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            None,
+            WindowDisplay::default(),
+            &OverlayContext::default(),
+            Some(2),
+        );
+        assert!(panel.text.contains("\x1b[1;1H"));
+        assert!(!panel.text.contains("a "), "row zero is scrolled away");
+        assert!(panel.text.contains("c"));
+        assert_eq!(viewport.top, 2);
+        // A request past the text clamps to the final row instead of showing
+        // an entirely empty body.
+        let panel = viewport.panel_decorated(
+            data,
+            0,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            None,
+            WindowDisplay::default(),
+            &OverlayContext::default(),
+            Some(9),
+        );
+        assert!(!panel.text.contains('a'));
+        assert_eq!(viewport.top, 4);
     }
 
     #[test]

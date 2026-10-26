@@ -2013,8 +2013,8 @@ impl NativeAction {
         use NativeHandler as H;
         use NativeMotion as M;
         match (self.definition().handler, self.definition().argument) {
-            (H::Window | H::Wscroll | H::Wslide, _) | (H::Call, A::Call(NativeCall::Redraw)) => {
-                NativeSupport::Unsupported("requires the host viewport action engine")
+            (H::Wscroll | H::Wslide, _) => {
+                NativeSupport::Unsupported("requires the host viewport scroll engine")
             }
             (
                 H::Movement,
@@ -2106,6 +2106,8 @@ impl Editor {
                 }
                 return Ok(action);
             }
+            (H::Window, A::Window(window)) => return self.native_window(window),
+            (H::Call, A::Call(NativeCall::Redraw)) => return Ok(EditorAction::Continue),
             (H::Jumplist, A::Integer(advance)) => {
                 let advance = isize::try_from(advance)
                     .map_err(|_| EditorError("jump list advance out of range".into()))?;
@@ -2833,6 +2835,21 @@ impl Editor {
     /// layout with the body geometry the UI last reported, so no frame-sized
     /// state is retained. Window motions land on the start of a visible row;
     /// screen motions keep the preferred display column.
+    /// Native `zt`/`zz`/`zb`: ask the next frame to place the cursor row at
+    /// the top, center or bottom of the body. Cursor and text are unchanged.
+    fn native_window(&mut self, window: NativeWindow) -> Result<EditorAction, EditorError> {
+        use NativeWindow as W;
+        let viewport = self.viewport;
+        let data = self.text.to_vec();
+        let (row, _) = screen_position(&data, self.cursor, viewport.width.max(1), self.tab_width);
+        let top = match window {
+            W::Top => row,
+            W::Center => row.saturating_sub(viewport.height / 2),
+            W::Bottom => row.saturating_sub(viewport.height.saturating_sub(1)),
+        };
+        self.request_scroll(top);
+        Ok(EditorAction::Continue)
+    }
     fn native_view_motion(&mut self, movement: NativeMotion) -> Result<EditorAction, EditorError> {
         use NativeMotion as M;
         let viewport = self.viewport;

@@ -142,3 +142,50 @@ fn g_screen_line_keys_move_wrapped_rows() {
     keys(&mut ws, "gm");
     assert_eq!(ws.editor.cursor, 2, "gm centers within the display row");
 }
+
+#[test]
+fn redraw_actions_request_rows_and_frames_consume_them() {
+    let mut lines = String::new();
+    for line in 0..100 {
+        lines.push_str(&format!("l{line}\n"));
+    }
+    let mut ws = workspace(lines.as_bytes());
+    measure(&mut ws, 10, 5, 0);
+    keys(&mut ws, "G");
+    action(&mut ws, NativeAction::WindowRedrawTop);
+    assert_eq!(
+        ws.editor.scroll_request(),
+        Some(99),
+        "cursor row becomes top"
+    );
+    assert_eq!(ws.frames()[0].topline, Some(99));
+    ws.clear_scroll_requests();
+    assert_eq!(ws.editor.scroll_request(), None, "requests are one-shot");
+    action(&mut ws, NativeAction::WindowRedrawCenter);
+    assert_eq!(ws.editor.scroll_request(), Some(97));
+    action(&mut ws, NativeAction::WindowRedrawBottom);
+    assert_eq!(ws.editor.scroll_request(), Some(95));
+    action(&mut ws, NativeAction::Redraw);
+    assert_eq!(
+        ws.editor.scroll_request(),
+        Some(95),
+        "plain redraw keeps scroll"
+    );
+}
+
+#[test]
+fn redraw_keys_request_cursor_relative_rows() {
+    let mut lines = String::new();
+    for line in 0..100 {
+        lines.push_str(&format!("l{line}\n"));
+    }
+    let mut ws = workspace(lines.as_bytes());
+    measure(&mut ws, 10, 5, 0);
+    keys(&mut ws, "G");
+    keys(&mut ws, "zt");
+    assert_eq!(ws.editor.scroll_request(), Some(99));
+    keys(&mut ws, "zz");
+    assert_eq!(ws.editor.scroll_request(), Some(97));
+    keys(&mut ws, "zb");
+    assert_eq!(ws.editor.scroll_request(), Some(95));
+}
