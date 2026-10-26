@@ -843,6 +843,10 @@ struct Viewport {
     /// First displayed soft-wrapped row, measured from the start of the buffer.
     top: usize,
     geometry: Option<ViewGeometry>,
+    /// Width of the native line number sidebar of the previous frame. The
+    /// native editor resizes the view when the sidebar width changes, so the
+    /// width follows the visible line numbers.
+    sidebar_width: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1369,7 +1373,25 @@ impl Viewport {
                 .top
                 .saturating_sub(body.saturating_sub(previous.height));
         }
-        let (cursor_row, cursor_column) = wrapped_cursor(data, cursor, columns, tab_width);
+        // Native line number sidebar: its width follows the visible line
+        // numbers and the body is laid out in the remaining columns.
+        let layout_columns = columns.saturating_sub(self.sidebar_width).max(1);
+        let sidebar = sidebar_columns(data, self.top, body, layout_columns, tab_width, &display);
+        self.sidebar_width = sidebar;
+        let text_columns = columns.saturating_sub(sidebar).max(1);
+        let (cursor_row, cursor_column) = wrapped_cursor(data, cursor, text_columns, tab_width);
+        let cursor_line =
+            crate::view::line_number_at_row(data, cursor_row, text_columns, tab_width).unwrap_or(1);
+        let numbers = line_numbers(
+            data,
+            self.top,
+            body,
+            text_columns,
+            tab_width,
+            &display,
+            cursor_line,
+            sidebar,
+        );
         if let Some(top) = requested_top {
             // Scroll actions place the cursor where the user will see it; do
             // not pull the view back, only clamp to the last row that exists.
@@ -1403,7 +1425,7 @@ impl Viewport {
             decorations.or_else(|| (!fallback.operations.is_empty()).then_some(&fallback));
         if let Some(styles) = decorations.filter(|styles| !styles.operations.is_empty()) {
             let text = ordered_panel(
-                data, self.top, selections, region, tab_width, display, styles, overlay,
+                data, self.top, selections, region, tab_width, display, styles, overlay, &numbers,
             );
             return PanelFrame {
                 text,
@@ -1414,14 +1436,14 @@ impl Viewport {
                         } else {
                             cursor_row.saturating_sub(self.top).min(body - 1) + 1
                         },
-                    region.x + cursor_column.min(columns - 1) + 1,
+                    region.x + sidebar + cursor_column.min(text_columns - 1) + 1,
                 ),
             };
         }
         let mut frame = String::from("\x1b[0m");
         let visible = wrapped_rows_decorated(
             data,
-            columns,
+            text_columns,
             tab_width,
             self.top..self.top + body,
             selections,
@@ -1430,8 +1452,19 @@ impl Viewport {
         );
         for (row, rendered) in visible.into_iter().enumerate() {
             frame.push_str(&format!("\x1b[{};{}H", region.y + row + 1, region.x + 1));
+            if sidebar > 0 {
+                if let Some(number) = numbers.number(row) {
+                    let text = number.to_string();
+                    let padding = sidebar.saturating_sub(1 + text.len());
+                    frame.push_str(&" ".repeat(padding));
+                    frame.push_str(&text);
+                    frame.push(' ');
+                } else {
+                    frame.push_str(&" ".repeat(sidebar));
+                }
+            }
             frame.push_str(&rendered.text);
-            frame.push_str(&" ".repeat(columns.saturating_sub(rendered.width)));
+            frame.push_str(&" ".repeat(text_columns.saturating_sub(rendered.width)));
             frame.push_str("\x1b[0m");
         }
         if display.statusbar {
@@ -1482,12 +1515,12 @@ impl Viewport {
         } else {
             (
                 cursor_row.saturating_sub(self.top).min(body - 1) + 1,
-                cursor_column.min(columns - 1) + 1,
+                cursor_column.min(text_columns - 1) + 1,
             )
         };
         PanelFrame {
             text: frame,
-            cursor: (region.y + row, region.x + column),
+            cursor: (region.y + row, region.x + sidebar + column),
         }
     }
 }
@@ -1596,10 +1629,13 @@ fn ordered_panel(
     display: WindowDisplay,
     decorations: &ViewDecorations,
     overlay: &OverlayContext,
+    numbers: &LineNumbers,
 ) -> String {
     let width = region.width;
     let height = region.height;
     let body_height = height.saturating_sub(usize::from(display.statusbar));
+    let sidebar = numbers.width;
+    let text_width = width.saturating_sub(sidebar).max(1);
     let base = decorations
         .base
         .unwrap_or_else(|| resolved_style(Some(decorations), 0));
@@ -1615,13 +1651,13 @@ fn ordered_panel(
         in_line: false,
         eof_symbol: false,
     };
-    let mut body = vec![blank.clone(); width * body_height];
+    let mut body = vec![blank.clone(); text_width * body_height];
     let mut ui = vec![blank; width * height];
     let mut eof_row = None;
     let mut last_source = None;
     let mut source_position = 0;
     let mut visible_start = None;
-    walk_cells(data, width, tab_width, |cell| {
+    walk_cells(data, text_width, tab_width, |cell| {
         let file_bytes = if last_source == Some(cell.pos) {
             0
         } else {
@@ -1646,7 +1682,7 @@ fn ordered_panel(
             let mut column = cell.column.min(width);
             while column > 0 {
                 column -= 1;
-                if body[row * width + column].width > 0 {
+                if body[row * text_width + column].width > 0 {
                     body[row * width + column]
                         .text
                         .push_str(&display_token(data, cell.pos, cell.column).0);
@@ -1661,7 +1697,7 @@ fn ordered_panel(
             CellKind::Replacement => "?".into(),
             CellKind::Space | CellKind::Eof => " ".into(),
         };
-        let index = row * width + cell.column;
+        let index = row * text_width + cell.column;
         body[index].text = token;
         body[index].width = cell.width;
         body[index].source = Some(cell.pos);
@@ -1686,8 +1722,8 @@ fn ordered_panel(
         if let Some(eof) = eof_row {
             for row in 0..body_height {
                 if top + row > eof {
-                    body[row * width].text = "~".into();
-                    body[row * width].eof_symbol = true;
+                    body[row * text_width].text = "~".into();
+                    body[row * text_width].eof_symbol = true;
                 }
             }
         }
@@ -1696,7 +1732,13 @@ fn ordered_panel(
     for operation in &decorations.operations {
         match operation {
             DrawOperation::Range { style, range } => {
-                paint_range(&mut body, width, visible_start.unwrap_or(0), range, *style);
+                paint_range(
+                    &mut body,
+                    text_width,
+                    visible_start.unwrap_or(0),
+                    range,
+                    *style,
+                );
             }
             DrawOperation::CoreOverlays {
                 selection,
@@ -1727,9 +1769,9 @@ fn ordered_panel(
                     .max()
                     .map_or(start, |position| motion::char_next(data, position));
                 for (position, is_primary) in &overlay.cursors {
-                    let (row, column) = wrapped_cursor(data, *position, width, tab_width);
-                    if row >= top && row < top + body_height && column < width {
-                        let cell = &mut body[(row - top) * width + column];
+                    let (row, column) = wrapped_cursor(data, *position, text_width, tab_width);
+                    if row >= top && row < top + body_height && column < text_width {
+                        let cell = &mut body[(row - top) * text_width + column];
                         cell.style = cell
                             .style
                             .merge(if *is_primary { *primary } else { *cursor });
@@ -1739,9 +1781,10 @@ fn ordered_panel(
                             motion::bracket_match_range(data, *position, start..end)
                                 .filter(|matching| matching != position)
                         {
-                            let (row, column) = wrapped_cursor(data, matching, width, tab_width);
-                            if row >= top && row < top + body_height && column < width {
-                                let cell = &mut body[(row - top) * width + column];
+                            let (row, column) =
+                                wrapped_cursor(data, matching, text_width, tab_width);
+                            if row >= top && row < top + body_height && column < text_width {
+                                let cell = &mut body[(row - top) * text_width + column];
                                 cell.style = cell.style.merge(*selection);
                             }
                         }
@@ -1770,14 +1813,17 @@ fn ordered_panel(
                 );
             }
             DrawOperation::BodyCopy => {
-                ui[..body.len()].clone_from_slice(&body);
+                copy_body(&mut ui, &body, width, text_width, sidebar, body_height);
                 copied = true;
             }
             DrawOperation::Cell { .. } => {}
         }
     }
     if !copied {
-        ui[..body.len()].clone_from_slice(&body);
+        copy_body(&mut ui, &body, width, text_width, sidebar, body_height);
+    }
+    if sidebar > 0 {
+        draw_sidebar(&mut ui, numbers, width, body_height, base, decorations);
     }
     let mut output = String::new();
     for (row, cells) in ui.chunks(width).enumerate() {
@@ -1796,6 +1842,146 @@ fn ordered_panel(
         output.push_str("\x1b[0m");
     }
     output
+}
+
+/// Native line number sidebar: the width it occupies and the number of each
+/// visible row.
+struct LineNumbers {
+    width: usize,
+    numbers: Vec<usize>,
+    /// Line number of the cursor, which uses the cursor line number style.
+    cursor_line: usize,
+}
+
+impl LineNumbers {
+    fn none() -> Self {
+        Self {
+            width: 0,
+            numbers: Vec::new(),
+            cursor_line: 1,
+        }
+    }
+
+    /// The number drawn in a visible row.
+    fn number(&self, row: usize) -> Option<usize> {
+        self.numbers.get(row).copied()
+    }
+}
+
+/// The width of the native line number sidebar. The native sidebar is as wide
+/// as the last visible line number plus a separating space, and never
+/// narrower than the `numberwidth` option.
+fn sidebar_columns(
+    data: &[u8],
+    top: usize,
+    body: usize,
+    columns: usize,
+    tab_width: usize,
+    display: &WindowDisplay,
+) -> usize {
+    if !display.numbers && !display.relativenumbers {
+        return 0;
+    }
+    let last = if body == 0 {
+        1
+    } else {
+        crate::view::line_number_at_row(data, top + body - 1, columns, tab_width).unwrap_or(1)
+    };
+    (last.to_string().len() + 1)
+        .max(display.numberwidth)
+        .min(columns)
+}
+
+/// The number of every visible row, honouring the native relative numbering.
+#[allow(clippy::too_many_arguments)]
+fn line_numbers(
+    data: &[u8],
+    top: usize,
+    body: usize,
+    columns: usize,
+    tab_width: usize,
+    display: &WindowDisplay,
+    cursor_line: usize,
+    width: usize,
+) -> LineNumbers {
+    if width == 0 {
+        return LineNumbers::none();
+    }
+    let lines = crate::view::row_line_numbers(data, top..top + body, columns, tab_width);
+    let numbers = lines
+        .into_iter()
+        .map(|line| {
+            if display.relativenumbers && !display.numbers {
+                line.abs_diff(cursor_line)
+            } else {
+                line
+            }
+        })
+        .collect();
+    LineNumbers {
+        width,
+        numbers,
+        cursor_line,
+    }
+}
+
+/// Copy the body rows into the window grid, leaving the sidebar columns.
+fn copy_body(
+    ui: &mut [PaintCell],
+    body: &[PaintCell],
+    width: usize,
+    text_width: usize,
+    sidebar: usize,
+    body_height: usize,
+) {
+    for row in 0..body_height {
+        let start = row * width + sidebar;
+        let source = row * text_width;
+        let length = text_width.min(body.len().saturating_sub(source));
+        ui[start..start + length].clone_from_slice(&body[source..source + length]);
+    }
+}
+
+/// Draw the native line number sidebar: the number of every visible row,
+/// right aligned in front of the text.
+fn draw_sidebar(
+    ui: &mut [PaintCell],
+    numbers: &LineNumbers,
+    width: usize,
+    body_height: usize,
+    base: Style,
+    decorations: &ViewDecorations,
+) {
+    let sidebar = numbers.width;
+    for row in 0..body_height {
+        let Some(number) = numbers.number(row) else {
+            continue;
+        };
+        let text = number.to_string();
+        let digits = text.len();
+        let padding = sidebar.saturating_sub(1 + digits);
+        let style = base.merge(resolved_style(
+            Some(decorations),
+            if numbers.cursor_line == number { 6 } else { 5 },
+        ));
+        for column in 0..sidebar {
+            let cell = &mut ui[row * width + column];
+            cell.style = style;
+            cell.width = 1;
+            cell.text.clear();
+        }
+        for (offset, character) in text.chars().enumerate() {
+            let cell = &mut ui[row * width + padding + offset];
+            cell.text = character.to_string();
+            cell.width = 1;
+            cell.style = style;
+        }
+        // The native sidebar separates the number from the text with a space.
+        let separator = &mut ui[row * width + sidebar - 1];
+        separator.text = " ".into();
+        separator.width = 1;
+        separator.style = style;
+    }
 }
 
 fn resolved_style(decorations: Option<&ViewDecorations>, id: usize) -> Style {
@@ -2117,6 +2303,7 @@ mod tests {
             oneline: true,
             statusbar: false,
             showeof: false,
+            ..WindowDisplay::default()
         };
         let views = [view(1, b"left", 0, &[]), view(2, b"right", 0, &[]), prompt];
         let mut ports = BTreeMap::new();
@@ -2145,6 +2332,7 @@ mod tests {
             oneline: false,
             statusbar: false,
             showeof: false,
+            ..WindowDisplay::default()
         };
         let mut ports = BTreeMap::new();
         let frame = compose_views(
@@ -2174,6 +2362,7 @@ mod tests {
             oneline: true,
             statusbar: false,
             showeof: false,
+            ..WindowDisplay::default()
         };
         let mut ports = BTreeMap::new();
         let frame = compose_views(
@@ -2412,6 +2601,7 @@ mod tests {
             WindowDisplay::default(),
             &decoration,
             &OverlayContext::default(),
+            &LineNumbers::none(),
         );
         assert!(frame.contains("\x1b[2;4;32;41ma"), "{frame:?}");
         assert!(frame.contains("\x1b[33;47mL"), "{frame:?}");
@@ -2431,6 +2621,7 @@ mod tests {
             WindowDisplay::default(),
             &decoration,
             &OverlayContext::default(),
+            &LineNumbers::none(),
         );
         assert!(
             frame.contains("\x1b[2;1H\x1b[0m\x1b[36;47mZ   "),
@@ -2465,6 +2656,7 @@ mod tests {
             WindowDisplay::default(),
             &decoration,
             &OverlayContext::default(),
+            &LineNumbers::none(),
         );
         assert!(
             tab.contains("\x1b[1;31;40m \x1b[0m\x1b[37;40m      Z"),
@@ -2479,6 +2671,7 @@ mod tests {
             WindowDisplay::default(),
             &decoration,
             &OverlayContext::default(),
+            &LineNumbers::none(),
         );
         assert!(
             control.contains("\x1b[1;31;40m^A\x1b[0m\x1b[37;40mZ"),
@@ -2497,6 +2690,7 @@ mod tests {
             WindowDisplay::default(),
             &decoration,
             &OverlayContext::default(),
+            &LineNumbers::none(),
         );
         assert!(!eof.contains("31;40m"), "{eof:?}");
     }
@@ -2524,6 +2718,7 @@ mod tests {
             WindowDisplay::default(),
             &decoration,
             &OverlayContext::default(),
+            &LineNumbers::none(),
         );
         assert!(
             frame.contains("\x1b[3;31;47m       \x1b[0m\x1b[1;34;47mZ"),
@@ -2618,6 +2813,81 @@ mod tests {
         assert_eq!(viewports.len(), 1);
         assert!(viewports.contains_key(&2));
         assert!(compose_views(&mut viewports, &[], 2, Layout::Horizontal, "", (1, 1)).is_err());
+    }
+
+    #[test]
+    fn the_native_overlay_path_draws_the_body() {
+        let data = b"one\ntwo\nthree\n";
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 4,
+        };
+        let mut viewport = Viewport::default();
+        let overlay = OverlayContext {
+            cursors: Vec::new(),
+            match_brackets: false,
+            native_view: true,
+        };
+        let panel = viewport.panel_decorated(
+            data,
+            0,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            None,
+            WindowDisplay::default(),
+            &overlay,
+            None,
+            None,
+        );
+        assert!(panel.text.contains("one"), "{:?}", panel.text);
+        assert!(panel.text.contains("three"), "{:?}", panel.text);
+    }
+
+    #[test]
+    fn the_line_number_sidebar_labels_the_visible_rows() {
+        let data = b"one\ntwo\nthree\n";
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 4,
+        };
+        let mut viewport = Viewport::default();
+        let display = WindowDisplay {
+            numbers: true,
+            ..WindowDisplay::default()
+        };
+        let overlay = OverlayContext {
+            cursors: Vec::new(),
+            match_brackets: false,
+            native_view: true,
+        };
+        let panel = viewport.panel_decorated(
+            data,
+            0,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            None,
+            display,
+            &overlay,
+            None,
+            None,
+        );
+        // The sidebar holds the line number and a separating space.
+        assert!(panel.text.contains("1 one"), "{:?}", panel.text);
+        assert!(panel.text.contains("2 two"), "{:?}", panel.text);
+        // The body keeps the remaining columns.
+        assert!(panel.text.contains("three"), "{:?}", panel.text);
     }
 
     #[test]

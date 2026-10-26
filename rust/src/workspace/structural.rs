@@ -88,60 +88,7 @@ impl Workspace {
                     .strip_prefix("no")
                     .map_or((raw, false), |name| (name, true));
                 let value = equal_value.or_else(|| request.args.get(1).map(String::as_str));
-                let (mut width, mut expand, mut auto) = self
-                    .window_options(request.window)
-                    .ok_or_else(|| invalid("closed window"))?;
-                let boolean = |current: bool| -> io::Result<bool> {
-                    if toggle {
-                        if value.is_some() {
-                            return Err(invalid("toggle does not accept a value"));
-                        }
-                        return Ok(!current);
-                    }
-                    if negate {
-                        return Ok(false);
-                    }
-                    match value {
-                        None | Some("1" | "true" | "yes" | "on") => Ok(true),
-                        Some("0" | "false" | "no" | "off") => Ok(false),
-                        _ => Err(invalid("expected boolean option value")),
-                    }
-                };
-                match name {
-                    "tabwidth" | "tw" => {
-                        width = value
-                            .and_then(|value| value.parse::<usize>().ok())
-                            .filter(|value| (1..=8).contains(value))
-                            .ok_or_else(|| invalid("tab width must be 1..8"))?;
-                    }
-                    "expandtab" | "et" => expand = boolean(expand)?,
-                    "autoindent" | "ai" => auto = boolean(auto)?,
-                    "shell" => {
-                        let shell =
-                            value.ok_or_else(|| invalid("shell option requires a program"))?;
-                        self.editor.set_shell(Some(shell.to_string()));
-                    }
-                    "escdelay" => {
-                        let delay = value
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .ok_or_else(|| invalid("escape delay must be a number"))?;
-                        self.editor
-                            .set_escape_delay(Some(std::time::Duration::from_millis(delay)));
-                    }
-                    "statusbar" | "sb" | "showeof" => {
-                        let mut display = self
-                            .window_display(request.window)
-                            .ok_or_else(|| invalid("closed window"))?;
-                        if name == "showeof" {
-                            display.showeof = boolean(display.showeof)?;
-                        } else {
-                            display.statusbar = boolean(display.statusbar)?;
-                        }
-                        self.set_window_display(request.window, display)?;
-                    }
-                    _ => return Err(invalid(format!("unsupported option: {name}"))),
-                }
-                self.set_window_options(request.window, width, expand, auto)?;
+                self.apply_set_option(name, value, toggle, negate, request.window)?;
                 Ok(EditorAction::Continue)
             }
             H::Substitute => Err(invalid(
@@ -170,6 +117,96 @@ impl Workspace {
                 }
             })
             .collect()
+    }
+
+    /// Apply a native `set option [value]` command.
+    pub(super) fn apply_set_option(
+        &mut self,
+        name: &str,
+        value: Option<&str>,
+        toggle: bool,
+        negate: bool,
+        window: usize,
+    ) -> io::Result<()> {
+        let (mut width, mut expand, mut auto) = self
+            .window_options(window)
+            .ok_or_else(|| invalid("closed window"))?;
+        let boolean = |current: bool| -> io::Result<bool> {
+            if toggle {
+                if value.is_some() {
+                    return Err(invalid("toggle does not accept a value"));
+                }
+                return Ok(!current);
+            }
+            if negate {
+                return Ok(false);
+            }
+            match value {
+                None | Some("1" | "true" | "yes" | "on") => Ok(true),
+                Some("0" | "false" | "no" | "off") => Ok(false),
+                _ => Err(invalid("expected boolean option value")),
+            }
+        };
+        match name {
+            "tabwidth" | "tw" => {
+                width = value
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| (1..=8).contains(value))
+                    .ok_or_else(|| invalid("tab width must be 1..8"))?;
+            }
+            "expandtab" | "et" => expand = boolean(expand)?,
+            "autoindent" | "ai" => auto = boolean(auto)?,
+            "shell" => {
+                let shell = value.ok_or_else(|| invalid("shell option requires a program"))?;
+                self.editor.set_shell(Some(shell.to_string()));
+            }
+            "escdelay" => {
+                let delay = value
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| invalid("escape delay must be a number"))?;
+                self.editor
+                    .set_escape_delay(Some(std::time::Duration::from_millis(delay)));
+            }
+            "statusbar" | "sb" | "showeof" => {
+                let mut display = self
+                    .window_display(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                if name == "showeof" {
+                    display.showeof = boolean(display.showeof)?;
+                } else {
+                    display.statusbar = boolean(display.statusbar)?;
+                }
+                self.set_window_display(window, display)?;
+            }
+            "numbers" | "nu" | "relativenumbers" | "rnu" => {
+                let mut display = self
+                    .window_display(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                // The native absolute and relative number options are
+                // mutually exclusive.
+                let relative = matches!(name, "relativenumbers" | "rnu");
+                let enabled = boolean(if relative {
+                    display.relativenumbers
+                } else {
+                    display.numbers
+                })?;
+                display.numbers = enabled && !relative;
+                display.relativenumbers = enabled && relative;
+                self.set_window_display(window, display)?;
+            }
+            "numberwidth" | "nuw" => {
+                let mut display = self
+                    .window_display(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                display.numberwidth = value
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or_else(|| invalid("number width must be a number"))?;
+                self.set_window_display(window, display)?;
+            }
+            _ => return Err(invalid(format!("unsupported option: {name}"))),
+        }
+        self.set_window_options(window, width, expand, auto)?;
+        Ok(())
     }
 
     fn structural_step(&mut self, execution: &mut Execution) -> Result<SamStep, SamError> {

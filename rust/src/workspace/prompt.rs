@@ -88,6 +88,7 @@ impl Workspace {
                     oneline: true,
                     statusbar: false,
                     showeof: false,
+                    ..WindowDisplay::default()
                 },
             )?;
             self.focus_window(id)?;
@@ -212,6 +213,7 @@ impl Workspace {
             oneline: false,
             statusbar: false,
             showeof: true,
+            ..WindowDisplay::default()
         };
         Ok(())
     }

@@ -112,6 +112,14 @@ The first visible row is anchored to its content with a text mark, like native
 instead of moving the window. The anchor travels with the window while it is
 unfocused and is dropped when its line disappears.
 
+The native `numbers`, `relativenumbers` and `numberwidth` options draw the
+line number sidebar: the number of every visible row, right aligned in front of
+the text, with the distance to the cursor line for the relative variant. The
+sidebar takes its width from the visible line numbers, like the native editor,
+and the body is laid out in the remaining columns. The window scoped options
+(`statusbar`, `showeof`, `oneline` and the number options) are applied by the
+host, which owns the window display, so `:set` reaches them again.
+
 The display widths follow the Unicode character database instead of a coarse
 approximation: the generated tables list the zero width and the wide
 characters, which fixes several thousand code points that the previous ranges
@@ -189,6 +197,9 @@ Known compatibility differences and limits:
   in-place write can leave partial data. Explicit atomic replacement preserves
   Unix owner/group/mode, rejects linked files, and does not copy ACLs/xattrs.
   Conflict checks are best effort, not filesystem locks.
+* The native `cursorline` and `colorcolumn` options and the replacement
+  symbols of `showspaces`, `showtabs` and `shownewlines` are not drawn yet;
+  the native symbol options come from the syntax layer.
 * Display widths follow the Unicode character database: characters in the
   combining and format categories occupy no column, characters with an East
   Asian width of `Wide` or `Fullwidth` occupy two. The tables are generated
@@ -450,7 +461,8 @@ and no unsupported action.
 Window motions clamp to the last row that holds source cells rather than the
 virtual EOF cursor row, matching native `L` in short files.
 
-Verification: the option tests in `rust/tests/global_options.rs`, the anchor
+Verification: the option tests in `rust/tests/global_options.rs` and
+`rust/tests/numbers_options.rs`, the anchor
 tests in `rust/tests/view_anchor.rs`, the default
 binding test in `rust/tests/default_bindings.rs`,
 eleven host tests in `rust/tests/viewport_motions.rs` plus

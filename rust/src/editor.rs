@@ -6369,6 +6369,42 @@ impl Editor {
     pub fn execute_command(&mut self, command: &str) -> Result<EditorAction, EditorError> {
         self.execute_command_with_policy(command, false)
     }
+    /// The native window scoped options are applied by the host, which owns
+    /// the window display. This returns the host command for them.
+    fn window_option_command(arg: &str) -> Option<String> {
+        let mut words = arg.split_whitespace();
+        let first = words.next()?;
+        let (raw, inline) = match first.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (first, None),
+        };
+        let name = raw.trim_end_matches('!');
+        if !matches!(
+            name,
+            "statusbar"
+                | "sb"
+                | "showeof"
+                | "oneline"
+                | "numbers"
+                | "nu"
+                | "relativenumbers"
+                | "rnu"
+                | "numberwidth"
+                | "nuw"
+        ) {
+            return None;
+        }
+        let mut command = format!("set {name}");
+        if let Some(value) = inline {
+            command.push(' ');
+            command.push_str(&value);
+        } else if let Some(value) = words.next() {
+            command.push(' ');
+            command.push_str(value);
+        }
+        Some(command)
+    }
+
     fn execute_command_with_policy(
         &mut self,
         command: &str,
@@ -6462,6 +6498,11 @@ impl Editor {
             "qall" => return Ok(EditorAction::HostCommand(command.to_owned())),
             "q" | "quit" => return Ok(EditorAction::Quit { force }),
             "set" => {
+                // The window scoped options belong to the host, which owns the
+                // window display.
+                if let Some(command) = Self::window_option_command(arg) {
+                    return Ok(EditorAction::HostCommand(command));
+                }
                 let result = (|| -> Result<(), EditorError> {
                     // Native `set option [value]`: the option name comes first
                     // and an option that takes a value reads the next word.

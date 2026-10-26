@@ -6,6 +6,7 @@
 //! screen-line motions must agree on that layout, so both use this module.
 //! Nothing proportional to the file size is stored; callers stream cells or
 //! stop early.
+use std::ops::Range;
 
 use crate::motion;
 
@@ -34,6 +35,8 @@ pub enum CellKind {
 pub struct WrappedCell {
     /// Zero-based display row.
     pub row: usize,
+    /// One-based source line displayed in this row.
+    pub line: usize,
     /// Zero-based display column of the cell's left edge.
     pub column: usize,
     /// Display width in columns; continuation cells are separate entries only
@@ -85,6 +88,7 @@ pub fn walk_cells(
     let mut row = 0;
     let mut column = 0;
     let mut pos = 0;
+    let mut line = 1;
     while pos < data.len() {
         let byte = data[pos];
         if byte == b'\t' {
@@ -96,6 +100,7 @@ pub fn walk_cells(
                 }
                 if !visit(WrappedCell {
                     row,
+                    line,
                     column,
                     width: 1,
                     pos,
@@ -114,6 +119,7 @@ pub fn walk_cells(
             }
             if !visit(WrappedCell {
                 row,
+                line,
                 column,
                 width: 1,
                 pos,
@@ -125,6 +131,7 @@ pub fn walk_cells(
             row += 1;
             column = 0;
             pos += 1;
+            line += 1;
         } else {
             let (mut width, len) = token_metrics(data, pos, column);
             let kind = if width > columns {
@@ -139,6 +146,7 @@ pub fn walk_cells(
             }
             if !visit(WrappedCell {
                 row,
+                line,
                 column,
                 width,
                 pos,
@@ -157,12 +165,57 @@ pub fn walk_cells(
     }
     let _ = visit(WrappedCell {
         row,
+        line,
         column,
         width: 1,
         pos,
         len: 0,
         kind: CellKind::Eof,
     });
+}
+
+/// The source line displayed in a row.
+pub fn line_number_at_row(
+    data: &[u8],
+    row: usize,
+    columns: usize,
+    tab_width: usize,
+) -> Option<usize> {
+    let mut line = None;
+    walk_cells(data, columns.max(1), tab_width, |cell| {
+        if cell.row == row {
+            line = Some(cell.line);
+            return false;
+        }
+        true
+    });
+    line
+}
+
+/// The source line numbers of the display rows in a range. The native line
+/// number sidebar uses them to label the visible rows.
+pub fn row_line_numbers(
+    data: &[u8],
+    rows: Range<usize>,
+    columns: usize,
+    tab_width: usize,
+) -> Vec<usize> {
+    let mut numbers = Vec::new();
+    let mut last: Option<usize> = None;
+    walk_cells(data, columns.max(1), tab_width, |cell| {
+        if cell.row < rows.start {
+            return true;
+        }
+        if cell.row >= rows.end {
+            return false;
+        }
+        if last != Some(cell.row) {
+            last = Some(cell.row);
+            numbers.push(cell.line);
+        }
+        true
+    });
+    numbers
 }
 
 /// Zero-based default soft-wrapped screen coordinates for a byte position.

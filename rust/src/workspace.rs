@@ -45,6 +45,13 @@ pub struct WindowDisplay {
     pub oneline: bool,
     pub statusbar: bool,
     pub showeof: bool,
+    /// Native `numbers` option: label the rows with absolute line numbers.
+    pub numbers: bool,
+    /// Native `relativenumbers` option: label the rows with the distance to
+    /// the cursor line.
+    pub relativenumbers: bool,
+    /// Native `numberwidth` option: the minimum sidebar width.
+    pub numberwidth: usize,
 }
 
 impl Default for WindowDisplay {
@@ -53,6 +60,9 @@ impl Default for WindowDisplay {
             oneline: false,
             statusbar: true,
             showeof: true,
+            numbers: false,
+            relativenumbers: false,
+            numberwidth: 0,
         }
     }
 }
@@ -752,6 +762,29 @@ impl Workspace {
         let name = name.trim_end_matches('!');
         let args = &words[1..];
         match name {
+            "set" => {
+                let Some(option) = args.first() else {
+                    return Err(invalid("expected set option [value]"));
+                };
+                if args.len() > 2 {
+                    return Err(invalid("expected set option [value]"));
+                }
+                let (raw, equal_value) = option
+                    .split_once('=')
+                    .map_or((option.as_str(), None), |(name, value)| (name, Some(value)));
+                let toggle = raw.ends_with('!');
+                let raw = raw.trim_end_matches('!');
+                let (name, negate) = raw
+                    .strip_prefix("no")
+                    .map_or((raw, false), |name| (name, true));
+                let value = equal_value.or_else(|| args.get(1).map(String::as_str));
+                let window = self
+                    .windows
+                    .get(self.active)
+                    .map_or(usize::MAX, |window| window.id);
+                self.apply_set_option(name, value, toggle, negate, window)?;
+                Ok(Outcome::Continue)
+            }
             "wincmd" => match args.first().map(String::as_str) {
                 Some("w" | "j" | "l") => {
                     self.focus((self.active + 1) % self.windows.len())?;

@@ -729,7 +729,8 @@ impl Inner {
         }
         match name {
             "autoindent" | "ai" | "shell" | "escdelay" => Some(OptionScope::Global),
-            "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof" => {
+            "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof"
+            | "numbers" | "nu" | "relativenumbers" | "rnu" | "numberwidth" | "nuw" => {
                 Some(OptionScope::Window)
             }
             _ => None,
@@ -798,10 +799,16 @@ impl Inner {
                 Ok(match name {
                     "tabwidth" | "tw" => Value::Integer(tabwidth as i64),
                     "expandtab" | "et" => Value::Boolean(expandtab),
+                    "numberwidth" | "nuw" => match ws.window_display(id) {
+                        Some(display) => Value::Integer(display.numberwidth as i64),
+                        None => Value::Nil,
+                    },
                     _ => match ws.window_display(id) {
                         Some(display) => Value::Boolean(match name {
                             "oneline" => display.oneline,
                             "statusbar" => display.statusbar,
+                            "numbers" | "nu" => display.numbers,
+                            "relativenumbers" | "rnu" => display.relativenumbers,
                             _ => display.showeof,
                         }),
                         None => Value::Nil,
@@ -906,16 +913,60 @@ impl Inner {
             unreachable!("command target resolved")
         };
         let mut ws = self.workspace.borrow_mut();
-        if matches!(name, "oneline" | "statusbar" | "showeof") {
+        if matches!(
+            name,
+            "oneline" | "statusbar" | "showeof" | "numbers" | "nu" | "relativenumbers" | "rnu"
+        ) {
             let Some(mut display) = ws.window_display(id) else {
                 return Ok(false);
             };
-            let target = match name {
-                "oneline" => &mut display.oneline,
-                "statusbar" => &mut display.statusbar,
-                _ => &mut display.showeof,
+            // The native absolute and relative number options are mutually
+            // exclusive.
+            let relative = matches!(name, "relativenumbers" | "rnu");
+            match name {
+                "oneline" => {
+                    display.oneline = if toggle {
+                        !display.oneline
+                    } else {
+                        truth(&value)
+                    };
+                }
+                "statusbar" => {
+                    display.statusbar = if toggle {
+                        !display.statusbar
+                    } else {
+                        truth(&value)
+                    };
+                }
+                "showeof" => {
+                    display.showeof = if toggle {
+                        !display.showeof
+                    } else {
+                        truth(&value)
+                    };
+                }
+                _ => {
+                    let current = if relative {
+                        display.relativenumbers
+                    } else {
+                        display.numbers
+                    };
+                    let enabled = if toggle { !current } else { truth(&value) };
+                    display.numbers = enabled && !relative;
+                    display.relativenumbers = enabled && relative;
+                }
+            }
+            ws.set_window_display(id, display)
+                .map_err(mlua::Error::external)?;
+            return Ok(true);
+        }
+        if matches!(name, "numberwidth" | "nuw") {
+            let Some(mut display) = ws.window_display(id) else {
+                return Ok(false);
             };
-            *target = if toggle { !*target } else { truth(&value) };
+            display.numberwidth = exact_integer(&value)
+                .ok_or_else(|| mlua::Error::runtime("number width must be a number"))?
+                as usize;
             ws.set_window_display(id, display)
                 .map_err(mlua::Error::external)?;
             return Ok(true);

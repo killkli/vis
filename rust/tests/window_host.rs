@@ -132,6 +132,7 @@ fn split_copies_primary_ui_and_local_maps_after_open_callback_and_retains_chosen
         oneline: false,
         statusbar: false,
         showeof: false,
+        ..WindowDisplay::default()
     };
     ws.set_window_display(source, flags).unwrap();
     ws.editor
