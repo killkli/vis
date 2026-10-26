@@ -4064,12 +4064,20 @@ impl Editor {
                 self.native_new_selection(direction)?;
             }
             Key::Ctrl('d' | 'u' | 'j' | 'k') => {
-                self.selection_set
-                    .navigate(if matches!(key, Key::Ctrl('d' | 'j')) {
-                        1
+                // The native navigate action scrolls half a page while a
+                // single selection is active and only rotates the primary
+                // selection among several.
+                let down = matches!(key, Key::Ctrl('d' | 'j'));
+                if self.selection_set.len() == 1 {
+                    return self.invoke_native_action(if down {
+                        NativeAction::WindowHalfpageDown
                     } else {
-                        -1
+                        NativeAction::WindowHalfpageUp
                     });
+                }
+                let count = self.take_count() as isize;
+                self.selection_set
+                    .navigate(if down { count } else { -count });
                 self.sync_set_to_primary();
             }
             Key::Ctrl('p') => {
