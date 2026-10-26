@@ -63,6 +63,8 @@ BUILTINS = [
     ("file-end-linewise-inclusive", b"one\ntwo\nthree\n", "dG"),
     ("paragraph-change-inserts-newline", b"one two three\nfour five\nsix\n", "c{X<Escape>"),
     ("missing-textobject-still-changes", b"one two\n", "ci(X<Escape>"),
+    ("punctuation-word-search", b'<div class="x">\n  <p>hello</p>\n</div>\n', "*dn"),
+    ("punctuation-word-search-repeat", b'<div class="x">\n  <p>hello</p>\n</div>\n', "*n"),
     ("percent-scans-forward", b"alpha.beta, gamma_delta (x) [y] {z}\n", "d%"),
 ]
 

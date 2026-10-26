@@ -6640,6 +6640,14 @@ impl Editor {
             return Ok(None);
         }
         let word = &data[range];
+        // The native search builds a word-boundary regex, which cannot match a
+        // punctuation-only object; such a search leaves the search state alone.
+        let word_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        if !word.first().is_some_and(|&byte| word_char(byte))
+            || !word.last().is_some_and(|&byte| word_char(byte))
+        {
+            return Ok(None);
+        }
         self.word_search = Some(word.to_vec());
         self.search = Self::escape_pattern(word);
         self.search_backwards = backwards;
