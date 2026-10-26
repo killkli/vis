@@ -496,6 +496,23 @@ fn match_direction(
 pub fn bracket_match(data: &[u8], pos: usize) -> Option<usize> {
     bracket_match_range(data, pos, 0..data.len())
 }
+
+/// Native `bracket_match` motion: match the bracket under the cursor, or
+/// otherwise scan forward for the first bracket-like character. C falls back
+/// to the original position when no bracket remains.
+pub fn bracket_match_or_next(data: &[u8], pos: usize) -> usize {
+    if let Some(hit) = bracket_match(data, pos) {
+        if hit != pos {
+            return hit;
+        }
+    }
+    data.iter()
+        .enumerate()
+        .skip(pos)
+        .find(|(_, byte)| b"(){}[]<>'\"`".contains(byte))
+        .map_or(pos, |(offset, _)| offset)
+}
+
 pub fn bracket_match_range(data: &[u8], pos: usize, limits: Range<usize>) -> Option<usize> {
     let current = *data.get(pos)?;
     let (open, close) = pair(current)?;

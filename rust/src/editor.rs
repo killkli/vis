@@ -4309,7 +4309,7 @@ impl Editor {
                 Key::Char(')') => motion::sentence_next,
                 Key::Char('%') => {
                     inclusive = true;
-                    |d, p| motion::bracket_match(d, p).unwrap_or(p)
+                    motion::bracket_match_or_next
                 }
                 _ => return Ok(None),
             };
