@@ -183,9 +183,11 @@ function mappings and syntax styles are now implemented; see
 API gaps. Stable logical selection identities and per-window last-visual marks
 now survive focus and undo. Real modal prompt windows, mixed editable history and recursive aliases are
 also implemented. Still incomplete: option bindings beyond the fixture corpus,
-some pending-operator combinations, case/completion operations,
-paste dot-repeat and the history state notification. Custom wrapping also
-requires work. Default build/install/packaging
+some pending-operator combinations and the history state notification. Custom
+wrapping also requires work. The visual mode key table, visual put over an
+empty register and linewise yank now follow the native editor (see the
+visual mode checkpoint below), and paste dot-repeat matches the native
+editor in the key differential. Default build/install/packaging
 migration and remaining helper integration are pending. Core piece lookup/editing
 is linear in piece count; UI frames still flatten buffers and repaint visible
 cells. Existing C builds remain the default.
@@ -508,3 +510,44 @@ key sweeps stay 108/4 and 111/1, and the native-action differential stays at
 118 pass. The default key table is still incomplete for the remaining port
 options, so other native actions remain reachable only through mappings, Lua and
 symbolic keys.
+
+## Visual mode key table checkpoint (2026-10-26, macOS arm64)
+
+The visual mode key table now matches the native default bindings: `x`
+aliases the delete operator and `s` aliases the change operator, so they
+operate on the selection with the native linewise handling, while `D`,
+`C`, `Y`, `S` and `X` are unbound and leave the selection untouched.
+`u`/`U` run the selection case operators followed by Escape instead of
+reaching history. Keys that no binding in the active mode chain matches
+are silently discarded, as in `vis_keys_process`, so the remaining
+normal-only keys no longer report errors in visual modes.
+
+`<C-d>`, `<C-u>`, `<C-j>` and `<C-k>` follow native
+`ka_selections_navigate`: with a single selection they scroll half a
+page (extending a visual selection like any motion), and only among
+several selections do they rotate the primary cursor. The halfpage
+scroll keeps an end-of-text cursor verbatim, as `view_cursors_to` does,
+instead of rounding it back to the last byte.
+
+The put operator deletes the selection before inserting, so pasting an
+empty register over a selection removes it and returns to normal mode,
+and a linewise register over a non-linewise selection continues on the
+following line (`text_range_is_linewise`). Linewise yanks keep the
+cursor on its position (`op_yank` returns `c->pos` for linewise ranges),
+and leaving visual mode after an operator collapses the selection
+ranges to the cursor endpoints like the native mode leave hook.
+
+Verification: a 30-case visual/put/yank differential against the C
+oracle covers `v`/`V` selections with `x`, `s`, `d`, `c`, `y`, the
+unbound keys, `u`/`U`, counted variants, paste over selections with
+empty and non-empty registers, and dot-repeat sequences such as
+`VjYjp.`; every C-reachable case matches, and the feedkeys-only tokens
+(`<Delete>`, `<Del>`, `<Insert>`) are refused as unsupported because the
+native oracle cannot express them. The replay driver refuses those
+tokens rather than replaying different input. The strict key sweep stays
+at 17 pass with zero mismatches on the default fixture set, the full
+all-feature suite passes 291 tests, the standard-library-only suite and
+strict all-target Clippy pass, and formatting passes. One documented
+notation difference remains: `<C-m>` reaches the editor as `Key::Enter`
+because a terminal cannot send it as a distinct key, while the native
+feedkeys notation discards it in normal mode.
