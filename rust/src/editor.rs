@@ -3837,6 +3837,24 @@ impl Editor {
                 };
             }
             Key::Char('x' | 'X') | Key::Delete => {
+                // The native visual table aliases `x` to the delete operator,
+                // has no `X` binding, and runs the delete action for <Delete>,
+                // whose motion then applies in the restored normal mode.
+                if self.is_visual() {
+                    if key == Key::Char('X') {
+                        return Ok(EditorAction::Continue);
+                    }
+                    self.operator = Some(Operator::Delete);
+                    let Some(range) = self.selection() else {
+                        return Ok(EditorAction::Continue);
+                    };
+                    let action = self.apply_operator(range, self.mode == Mode::VisualLine)?;
+                    if key == Key::Delete {
+                        let data = self.text.to_vec();
+                        self.cursor = motion::char_next(&data, self.cursor);
+                    }
+                    return Ok(action);
+                }
                 let count = self.take_count();
                 self.operator = Some(Operator::Delete);
                 let data = self.text.to_vec();
@@ -3869,7 +3887,7 @@ impl Editor {
                 }
                 return self.apply_operator(self.cursor.min(other)..self.cursor.max(other), false);
             }
-            Key::Char('D' | 'C' | 'Y') => {
+            Key::Char('D' | 'C' | 'Y') if !self.is_visual() => {
                 let data = self.text.to_vec();
                 self.operator = Some(match key {
                     Key::Char('D') => Operator::Delete,
@@ -3891,6 +3909,18 @@ impl Editor {
                     .apply_operator(self.cursor..motion::line_end(&data, self.cursor), false);
             }
             Key::Char('s' | 'S') => {
+                // The native visual table aliases `s` to the change operator
+                // and has no `S` binding.
+                if self.is_visual() {
+                    if key == Key::Char('S') {
+                        return Ok(EditorAction::Continue);
+                    }
+                    self.operator = Some(Operator::Change);
+                    let Some(range) = self.selection() else {
+                        return Ok(EditorAction::Continue);
+                    };
+                    return self.apply_operator(range, self.mode == Mode::VisualLine);
+                }
                 self.operator = Some(Operator::Change);
                 let data = self.text.to_vec();
                 let count = self.take_count();
@@ -3911,6 +3941,20 @@ impl Editor {
                     self.language_map_disabled = true;
                 }
                 self.pending = Pending::ReplaceChar;
+            }
+            // The native visual table aliases `u`/`U` to the selection case
+            // operators followed by Escape; they never reach history here.
+            Key::Char('u') if self.is_visual() => {
+                let action = self.selection_case(CaseFold::Lower);
+                self.window_selection_save()?;
+                self.cancel();
+                return action;
+            }
+            Key::Char('U') if self.is_visual() => {
+                let action = self.selection_case(CaseFold::Upper);
+                self.window_selection_save()?;
+                self.cancel();
+                return action;
             }
             Key::Char('u') => {
                 let count = self.take_count();
@@ -4065,7 +4109,16 @@ impl Editor {
                     .map_err(|e| EditorError(e.to_string()))?;
                 self.sync_set_to_primary();
             }
-            _ => return Err(EditorError("unsupported key in this mode".into())),
+            _ => {
+                // The native editor silently discards a key that no binding
+                // in the active mode chain matches; the visual tables bind
+                // fewer keys than the normal table, so D/C/Y and friends end
+                // here as no-ops instead of errors.
+                if self.is_visual() {
+                    return Ok(EditorAction::Continue);
+                }
+                return Err(EditorError("unsupported key in this mode".into()));
+            }
         }
         Ok(EditorAction::Continue)
     }
