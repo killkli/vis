@@ -729,11 +729,11 @@ impl Inner {
         }
         match name {
             "autoindent" | "ai" | "shell" | "escdelay" | "ignorecase" | "ic" | "loadmethod"
-            | "change256colors" => Some(OptionScope::Global),
-            "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof"
-            | "numbers" | "nu" | "relativenumbers" | "rnu" | "numberwidth" | "nuw"
-            | "cursorline" | "cul" | "colorcolumn" | "cc" | "showspaces" | "showtabs"
-            | "shownewlines" | "wrapcolumn" | "wc" | "breakat" | "brk" => Some(OptionScope::Window),
+            | "change256colors" | "layout" => Some(OptionScope::Global),
+            "tabwidth" | "tw" | "expandtab" | "et" | "statusbar" | "showeof" | "numbers" | "nu"
+            | "relativenumbers" | "rnu" | "numberwidth" | "nuw" | "cursorline" | "cul"
+            | "colorcolumn" | "cc" | "showspaces" | "showtabs" | "shownewlines" | "wrapcolumn"
+            | "wc" | "breakat" | "brk" => Some(OptionScope::Window),
             _ => None,
         }
     }
@@ -799,6 +799,10 @@ impl Inner {
                         Some(delay) => Value::Integer(delay.as_millis() as i64),
                         None => Value::Nil,
                     }),
+                    "layout" => Ok(Value::Integer(match self.workspace.borrow().layout {
+                        crate::workspace::Layout::Horizontal => 0,
+                        crate::workspace::Layout::Vertical => 1,
+                    })),
                     _ => Ok(Value::Nil),
                 }
             }
@@ -829,9 +833,23 @@ impl Inner {
                         }
                         None => Value::Nil,
                     },
+                    "savemethod" => match ws
+                        .window_file_id(id)
+                        .and_then(|file| ws.buffer_save_method(file))
+                    {
+                        Some(crate::file::SaveMethod::Auto) => {
+                            Value::String(self.lua.create_string("auto")?)
+                        }
+                        Some(crate::file::SaveMethod::Atomic) => {
+                            Value::String(self.lua.create_string("atomic")?)
+                        }
+                        Some(crate::file::SaveMethod::InPlace) => {
+                            Value::String(self.lua.create_string("inplace")?)
+                        }
+                        None => Value::Nil,
+                    },
                     _ => match ws.window_display(id) {
                         Some(display) => Value::Boolean(match name {
-                            "oneline" => display.oneline,
                             "statusbar" => display.statusbar,
                             "numbers" | "nu" => display.numbers,
                             "relativenumbers" | "rnu" => display.relativenumbers,
@@ -927,6 +945,20 @@ impl Inner {
                     ws.editor.set_loadmethod(method);
                     return Ok(true);
                 }
+                "layout" => {
+                    ws.layout = match value {
+                        Value::Integer(0) => crate::workspace::Layout::Horizontal,
+                        Value::Integer(1) => crate::workspace::Layout::Vertical,
+                        Value::String(name) if name.to_str()? == "h" => {
+                            crate::workspace::Layout::Horizontal
+                        }
+                        Value::String(name) if name.to_str()? == "v" => {
+                            crate::workspace::Layout::Vertical
+                        }
+                        _ => return Err(mlua::Error::runtime("expected layout 0/1 or 'h'/'v'")),
+                    };
+                    return Ok(true);
+                }
                 "shell" => {
                     let shell = match value {
                         Value::String(shell) => Some(shell.to_str()?.to_string()),
@@ -964,10 +996,34 @@ impl Inner {
             unreachable!("command target resolved")
         };
         let mut ws = self.workspace.borrow_mut();
+        if name == "savemethod" {
+            let method = match value {
+                Value::String(method) => match method.to_str()?.as_ref() {
+                    "auto" => crate::file::SaveMethod::Auto,
+                    "atomic" => crate::file::SaveMethod::Atomic,
+                    "inplace" => crate::file::SaveMethod::InPlace,
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "expected save method 'auto', 'atomic' or 'inplace'",
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "expected save method 'auto', 'atomic' or 'inplace'",
+                    ));
+                }
+            };
+            let file = ws
+                .window_file_id(id)
+                .ok_or_else(|| mlua::Error::runtime("closed window"))?;
+            ws.set_buffer_save_method(file, method)
+                .map_err(mlua::Error::external)?;
+            return Ok(true);
+        }
         if matches!(
             name,
-            "oneline"
-                | "statusbar"
+            "statusbar"
                 | "showeof"
                 | "numbers"
                 | "nu"
@@ -986,13 +1042,6 @@ impl Inner {
             // exclusive.
             let relative = matches!(name, "relativenumbers" | "rnu");
             match name {
-                "oneline" => {
-                    display.oneline = if toggle {
-                        !display.oneline
-                    } else {
-                        truth(&value)
-                    };
-                }
                 "statusbar" => {
                     display.statusbar = if toggle {
                         !display.statusbar
@@ -3560,10 +3609,10 @@ const NATIVE_COMMANDS: &[&str] = &[
 fn builtin_option_kind(name: &str) -> Option<OptionKind> {
     match name {
         "tabwidth" | "tw" => Some(OptionKind::Number),
-        "expandtab" | "et" | "autoindent" | "ai" | "oneline" | "statusbar" | "showeof"
-        | "cursorline" | "cul" | "showspaces" | "showtabs" | "shownewlines" | "ignorecase"
-        | "ic" | "change256colors" => Some(OptionKind::Bool),
-        "loadmethod" => Some(OptionKind::String),
+        "expandtab" | "et" | "autoindent" | "ai" | "statusbar" | "showeof" | "cursorline"
+        | "cul" | "showspaces" | "showtabs" | "shownewlines" | "ignorecase" | "ic"
+        | "change256colors" => Some(OptionKind::Bool),
+        "loadmethod" | "savemethod" | "layout" => Some(OptionKind::String),
         "numberwidth" | "nuw" | "colorcolumn" | "cc" | "wrapcolumn" | "wc" => {
             Some(OptionKind::Number)
         }

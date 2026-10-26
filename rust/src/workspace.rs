@@ -1180,6 +1180,42 @@ mod tests {
     }
 
     #[test]
+    fn savemethod_option_updates_the_window_file() {
+        let mut workspace = Workspace::new(&[], None, false).unwrap();
+        let buffer = workspace.windows[workspace.active].buffer;
+        workspace.command("set savemethod inplace").unwrap();
+        assert_eq!(
+            workspace.buffer_save_method(buffer),
+            Some(SaveMethod::InPlace)
+        );
+        workspace
+            .command("set savemethod bogus")
+            .expect_err("invalid save method");
+        assert_eq!(
+            workspace.buffer_save_method(buffer),
+            Some(SaveMethod::InPlace)
+        );
+        workspace.command("set savemethod atomic").unwrap();
+        assert_eq!(
+            workspace.buffer_save_method(buffer),
+            Some(SaveMethod::Atomic)
+        );
+    }
+
+    #[test]
+    fn layout_option_sets_the_workspace_layout() {
+        let mut workspace = Workspace::new(&[], None, false).unwrap();
+        workspace.command("set layout v").unwrap();
+        assert_eq!(workspace.layout, Layout::Vertical);
+        workspace.command("set layout h").unwrap();
+        assert_eq!(workspace.layout, Layout::Horizontal);
+        workspace
+            .command("set layout horizontal")
+            .expect_err("native layout takes 'h' or 'v'");
+        assert_eq!(workspace.layout, Layout::Horizontal);
+    }
+
+    #[test]
     fn aliases_of_new_files_share_the_same_buffer() {
         let dir = Directory::new();
         let path = dir.0.join("new file");

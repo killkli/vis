@@ -129,7 +129,6 @@ impl Workspace {
                     | "statusbar"
                     | "sb"
                     | "showeof"
-                    | "oneline"
                     | "numbers"
                     | "nu"
                     | "relativenumbers"
@@ -251,6 +250,29 @@ impl Workspace {
                     .and_then(|value| value.parse::<usize>().ok())
                     .ok_or_else(|| invalid("wrap column must be a number"))?;
                 self.set_window_display(window, display)?;
+            }
+            "layout" => {
+                self.layout = match value {
+                    Some("h") => Layout::Horizontal,
+                    Some("v") => Layout::Vertical,
+                    _ => return Err(invalid("Invalid layout, expected 'h' or 'v'")),
+                };
+            }
+            "savemethod" => {
+                let method = match value {
+                    Some("auto") => SaveMethod::Auto,
+                    Some("atomic") => SaveMethod::Atomic,
+                    Some("inplace") => SaveMethod::InPlace,
+                    _ => {
+                        return Err(invalid(
+                            "Invalid save method, expected 'auto', 'atomic' or 'inplace'",
+                        ));
+                    }
+                };
+                let file = self
+                    .window_file_id(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                self.set_buffer_save_method(file, method)?;
             }
             "breakat" | "brk" => {
                 let characters = value.ok_or_else(|| invalid("break characters are required"))?;

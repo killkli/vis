@@ -6821,7 +6821,6 @@ impl Editor {
             "statusbar"
                 | "sb"
                 | "showeof"
-                | "oneline"
                 | "numbers"
                 | "nu"
                 | "relativenumbers"
@@ -6839,6 +6838,8 @@ impl Editor {
                 | "wc"
                 | "breakat"
                 | "brk"
+                | "savemethod"
+                | "layout"
         ) {
             return None;
         }
