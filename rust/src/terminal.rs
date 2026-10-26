@@ -20,6 +20,7 @@ use std::ops::Range;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const ESCAPE_DELAY: Duration = Duration::from_millis(30);
@@ -378,11 +379,11 @@ impl Decoder {
 }
 
 pub struct Terminal {
-    input: File,
-    output: File,
+    input: Arc<File>,
+    output: Arc<File>,
     /// The controlling terminal used for termios and size queries. A piped
     /// session starts without one and switches to it after stdin reaches EOF.
-    tty: Option<File>,
+    tty: Option<Arc<File>>,
     original: Option<Termios>,
     active: bool,
     size: (usize, usize),
@@ -417,7 +418,7 @@ impl Terminal {
         };
         let (tty, input, output, original, size) = if let Some((input, output)) = plain {
             let size = terminal_size(&output).unwrap_or((80, 24));
-            (None, input, output, None, size)
+            (None, Arc::new(input), Arc::new(output), None, size)
         } else {
             // macOS poll does not support the /dev/tty alias. Resolve the actual
             // terminal device first, without unsafe select or numeric descriptors.
@@ -443,13 +444,12 @@ impl Terminal {
             raw.make_raw();
             let size = terminal_size(&tty)?;
             tcsetattr(&tty, OptionalActions::Now, &raw)?;
-            let input = tty.try_clone()?;
-            let output = tty.try_clone()?;
-            (Some(tty), input, output, Some(original), size)
+            let tty = Arc::new(tty);
+            (Some(tty.clone()), tty.clone(), tty, Some(original), size)
         };
         // Construct the guard before entering the alternate screen, so even a
         // failed initial write restores the already-changed terminal settings.
-        let mut terminal = Self {
+        let terminal = Self {
             input,
             output,
             tty,
@@ -463,8 +463,9 @@ impl Terminal {
         };
         terminal
             .output
+            .as_ref()
             .write_all(b"\x1b[?1049h\x1b[?2004h\x1b[?25h\x1b[2J\x1b[H")?;
-        terminal.output.flush()?;
+        terminal.output.as_ref().flush()?;
         Ok(terminal)
     }
 
@@ -487,10 +488,10 @@ impl Terminal {
         let original = tcgetattr(&tty)?;
         let mut raw = original.clone();
         raw.make_raw();
-        let input = tty.try_clone()?;
         let size = terminal_size(&tty)?;
         tcsetattr(&tty, OptionalActions::Now, &raw)?;
-        self.input = input;
+        let tty = Arc::new(tty);
+        self.input = tty.clone();
         self.tty = Some(tty);
         self.original = Some(original);
         self.size = size;
@@ -541,7 +542,7 @@ impl Terminal {
                 tv_sec: 0,
                 tv_nsec: delay.as_nanos() as _,
             };
-            let mut descriptors = [PollFd::new(&self.input, PollFlags::IN)];
+            let mut descriptors = [PollFd::new(self.input.as_ref(), PollFlags::IN)];
             match poll(&mut descriptors, Some(&timeout)) {
                 Ok(0) if self.decoder.is_escape() => continue,
                 Ok(0) => return Ok(InputEvent::Timeout),
@@ -556,7 +557,7 @@ impl Terminal {
                 return Err(io::Error::other("terminal input is unavailable"));
             }
             let mut bytes = [0u8; 4096];
-            match self.input.read(&mut bytes) {
+            match self.input.as_ref().read(&mut bytes) {
                 Ok(0) if self.decoder.paste.is_some() => {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -638,8 +639,8 @@ impl Terminal {
             message,
             self.size,
         )?;
-        self.output.write_all(frame.as_bytes())?;
-        self.output.flush()?;
+        self.output.as_ref().write_all(frame.as_bytes())?;
+        self.output.as_ref().flush()?;
         Ok(self.geometries(views))
     }
 
@@ -722,8 +723,8 @@ impl Terminal {
             self.size,
             decorations,
         )?;
-        self.output.write_all(frame.as_bytes())?;
-        self.output.flush()?;
+        self.output.as_ref().write_all(frame.as_bytes())?;
+        self.output.as_ref().flush()?;
         Ok(self.geometries(views))
     }
 
@@ -742,8 +743,9 @@ impl Terminal {
         self.active = true;
         self.escape_since = None;
         self.output
+            .as_ref()
             .write_all(b"\x1b[?1049h\x1b[?2004h\x1b[?25h\x1b[2J\x1b[H")?;
-        self.output.flush()
+        self.output.as_ref().flush()
     }
 
     /// Restore terminal settings even if restoring screen output fails.
@@ -753,8 +755,9 @@ impl Terminal {
         }
         let output = self
             .output
+            .as_ref()
             .write_all(b"\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l")
-            .and_then(|()| self.output.flush());
+            .and_then(|()| self.output.as_ref().flush());
         let settings = match (&self.tty, &self.original) {
             (Some(tty), Some(original)) => {
                 tcsetattr(tty, OptionalActions::Now, original).map_err(io::Error::from)
