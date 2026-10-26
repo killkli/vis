@@ -35,6 +35,26 @@ fn the_escape_delay_option_is_reported_in_milliseconds() {
 }
 
 #[test]
+fn the_ignorecase_option_makes_the_search_case_insensitive() {
+    let mut ws = Workspace::new(&[], Some(b"Hello World\n".to_vec()), false).unwrap();
+    // Without the option the search is case sensitive and finds nothing.
+    assert!(ws.handle_key(Key::Char('/')).is_ok());
+    for character in "world".chars() {
+        ws.handle_key(Key::Char(character)).unwrap();
+    }
+    ws.handle_key(Key::Enter).unwrap();
+    assert_eq!(ws.editor.cursor, 0, "the case sensitive search finds nothing");
+    ws.command("set ignorecase").unwrap();
+    assert!(ws.editor.ignorecase(), "ignorecase option");
+    assert!(ws.handle_key(Key::Char('/')).is_ok());
+    for character in "world".chars() {
+        ws.handle_key(Key::Char(character)).unwrap();
+    }
+    ws.handle_key(Key::Enter).unwrap();
+    assert_eq!(ws.editor.cursor, 6, "the match starts at the second word");
+}
+
+#[test]
 fn an_invalid_escape_delay_is_rejected() {
     let mut ws = workspace();
     command(&mut ws, ":set escdelay soon");

@@ -112,6 +112,11 @@ The first visible row is anchored to its content with a text mark, like native
 instead of moving the window. The anchor travels with the window while it is
 unfocused and is dropped when its line disappears.
 
+The native `ignorecase` option is wired: the search matches the ASCII letters
+regardless of case, like native `REG_ICASE` in the C locale. The named classes
+keep the case of the input, and the option reaches the search through the
+`:set` command and the Lua option API.
+
 The remaining native window options are accepted and reported:
 `cursorline`, `colorcolumn`, `showspaces`, `showtabs`, `shownewlines` and
 `wrapcolumn`. The `wrapcolumn` option wraps the text at the smaller of the

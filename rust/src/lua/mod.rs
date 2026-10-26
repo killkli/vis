@@ -728,7 +728,9 @@ impl Inner {
             return Some(OptionScope::Global);
         }
         match name {
-            "autoindent" | "ai" | "shell" | "escdelay" => Some(OptionScope::Global),
+            "autoindent" | "ai" | "shell" | "escdelay" | "ignorecase" | "ic" => {
+                Some(OptionScope::Global)
+            }
             "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof"
             | "numbers" | "nu" | "relativenumbers" | "rnu" | "numberwidth" | "nuw"
             | "cursorline" | "cul" | "colorcolumn" | "cc" | "showspaces" | "showtabs"
@@ -779,6 +781,9 @@ impl Inner {
                 match name {
                     "autoindent" | "ai" => {
                         Ok(Value::Boolean(self.workspace.borrow().editor.auto_indent))
+                    }
+                    "ignorecase" | "ic" => {
+                        Ok(Value::Boolean(self.workspace.borrow().editor.ignorecase()))
                     }
                     "shell" => {
                         let shell = self.workspace.borrow().editor.shell();
@@ -888,6 +893,12 @@ impl Inner {
             }
             let mut ws = self.workspace.borrow_mut();
             match name {
+                "ignorecase" | "ic" => {
+                    let current = ws.editor.ignorecase();
+                    let enabled = if toggle { !current } else { truth(&value) };
+                    ws.editor.set_ignorecase(enabled);
+                    return Ok(true);
+                }
                 "shell" => {
                     let shell = match value {
                         Value::String(shell) => Some(shell.to_str()?.to_string()),
@@ -3513,9 +3524,8 @@ fn builtin_option_kind(name: &str) -> Option<OptionKind> {
     match name {
         "tabwidth" | "tw" => Some(OptionKind::Number),
         "expandtab" | "et" | "autoindent" | "ai" | "oneline" | "statusbar" | "showeof"
-        | "cursorline" | "cul" | "showspaces" | "showtabs" | "shownewlines" => {
-            Some(OptionKind::Bool)
-        }
+        | "cursorline" | "cul" | "showspaces" | "showtabs" | "shownewlines" | "ignorecase"
+        | "ic" => Some(OptionKind::Bool),
         "numberwidth" | "nuw" | "colorcolumn" | "cc" | "wrapcolumn" | "wc" => {
             Some(OptionKind::Number)
         }

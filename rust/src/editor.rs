@@ -572,6 +572,9 @@ pub struct Editor {
     scroll_request: Option<usize>,
     /// Native `escdelay` option.
     escape_delay: Option<std::time::Duration>,
+    /// Native `ignorecase` option: the search ignores the case of the ASCII
+    /// letters.
+    ignorecase: bool,
     /// Native `view->start_mark`: the first displayed row is tracked by a text
     /// mark, so edits above the view keep the visible content in place.
     view_anchor: Option<crate::text::Mark>,
@@ -673,6 +676,7 @@ impl Editor {
             scroll_request: None,
             view_anchor: None,
             escape_delay: None,
+            ignorecase: false,
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -840,7 +844,7 @@ impl Editor {
         if pattern.is_empty() {
             return Ok(EditorAction::Continue);
         }
-        if let Err(error) = Regex::new(pattern) {
+        if let Err(error) = self.search_regex(pattern) {
             // C vis_cancel resets the action, without view or mode hooks.
             self.pending = Pending::None;
             self.operator = None;
@@ -2448,6 +2452,26 @@ impl Editor {
     /// sequence is read as a plain escape key.
     pub fn set_escape_delay(&mut self, delay: Option<std::time::Duration>) {
         self.escape_delay = delay;
+    }
+
+    /// Native `ignorecase` option: the search matches the ASCII letters
+    /// regardless of case.
+    pub fn set_ignorecase(&mut self, ignorecase: bool) {
+        self.ignorecase = ignorecase;
+    }
+
+    pub fn ignorecase(&self) -> bool {
+        self.ignorecase
+    }
+
+    /// The search pattern, compiled with the native `ignorecase` option.
+    fn search_regex(&self, pattern: &str) -> Result<Regex, EditorError> {
+        let regex = if self.ignorecase {
+            Regex::new_ignorecase(pattern)
+        } else {
+            Regex::new(pattern)
+        };
+        regex.map_err(|error| EditorError(error.to_string()))
     }
 
     pub fn escape_delay(&self) -> Option<std::time::Duration> {
@@ -6165,7 +6189,7 @@ impl Editor {
                     Prompt::Search { backwards } => {
                         if !command.is_empty() {
                             self.word_search = None;
-                            Regex::new(&command).map_err(|e| EditorError(e.to_string()))?;
+                            self.search_regex(&command)?;
                             self.session
                                 .set_previous_regex(&command)
                                 .map_err(|e| EditorError(e.to_string()))?;
@@ -6220,7 +6244,7 @@ impl Editor {
         if self.search.is_empty() {
             return Err(EditorError("no previous search".into()));
         }
-        let regex = Regex::new(&self.search).map_err(|e| EditorError(e.to_string()))?;
+        let regex = self.search_regex(&self.search)?;
         let data = self.text.to_vec();
         let mut found = None;
         if backwards {
@@ -6296,7 +6320,7 @@ impl Editor {
             return Err(EditorError("no previous search".into()));
         }
         let data = self.text.to_vec();
-        let regex = Regex::new(&self.search).map_err(|e| EditorError(e.to_string()))?;
+        let regex = self.search_regex(&self.search)?;
         let count = self.combined_count()?;
         let mut ranges = Vec::new();
         for selection in self.selections() {
@@ -6532,6 +6556,8 @@ impl Editor {
                         match name {
                             "expandtab" | "et" => self.expand_tab = boolean(inline.as_deref())?,
                             "noexpandtab" | "noet" => self.expand_tab = false,
+                            "ignorecase" | "ic" => self.ignorecase = boolean(inline.as_deref())?,
+                            "noignorecase" | "noic" => self.ignorecase = false,
                             "autoindent" | "ai" => self.auto_indent = boolean(inline.as_deref())?,
                             "noautoindent" | "noai" => self.auto_indent = false,
                             "tabwidth" | "tw" => {

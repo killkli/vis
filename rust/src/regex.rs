@@ -86,14 +86,37 @@ enum Member {
     Named(&'static str),
 }
 
+/// Native `REG_ICASE` in the C locale folds the ASCII letters only.
+fn fold(value: u32) -> u32 {
+    if (u32::from(b'a')..=u32::from(b'z')).contains(&value) {
+        value - 32
+    } else {
+        value
+    }
+}
+
 impl Atom {
-    fn matches(&self, value: u32) -> bool {
+    fn matches(&self, value: u32, ignorecase: bool) -> bool {
+        // Native `REG_ICASE` folds the ASCII letters of the pattern and the
+        // input; the named classes keep the case of the input.
+        let folded = if ignorecase { fold(value) } else { value };
         match self {
-            Self::Literal(expected) => *expected == value,
+            Self::Literal(expected) => {
+                if ignorecase {
+                    fold(*expected) == folded
+                } else {
+                    *expected == value
+                }
+            }
             Self::Any => value != u32::from(b'\n'),
             Self::Class { negate, members } => {
                 let member = members.iter().any(|member| match member {
-                    Member::Range(start, end) => (*start..=*end).contains(&value),
+                    Member::Range(start, end) => {
+                        (*start..=*end).contains(&value)
+                            || (ignorecase
+                                && (fold(*start)..=fold(*end)).contains(&folded))
+                    }
+                    // The named classes keep the case of the input.
                     Member::Named(name) => named_class(name, value),
                 });
                 if *negate {
@@ -388,10 +411,22 @@ pub struct Regex {
     program: Vec<Instruction>,
     entry: usize,
     groups: usize,
+    /// Native `REG_ICASE`: the ASCII letters match regardless of case.
+    ignorecase: bool,
 }
 
 impl Regex {
     pub fn new(pattern: &str) -> Result<Self, RegexError> {
+        Self::with_options(pattern, false)
+    }
+
+    /// A pattern that matches the ASCII letters regardless of case, like the
+    /// native `ignorecase` option.
+    pub fn new_ignorecase(pattern: &str) -> Result<Self, RegexError> {
+        Self::with_options(pattern, true)
+    }
+
+    fn with_options(pattern: &str, ignorecase: bool) -> Result<Self, RegexError> {
         if pattern.len() > MAX_PATTERN {
             return Err(RegexError::Limit("pattern bytes"));
         }
@@ -408,6 +443,7 @@ impl Regex {
             program: vec![Instruction::Accept],
             entry: 0,
             groups: parser.groups,
+            ignorecase,
         };
         let end = regex.emit(Instruction::Save(1, 0))?;
         let body = regex.compile(&ast, end)?;
@@ -670,7 +706,7 @@ impl Regex {
                 let Instruction::Consume(atom, next) = &self.program[thread.pc] else {
                     unreachable!()
                 };
-                if atom.matches(value) {
+                if atom.matches(value, self.ignorecase) {
                     thread.pc = *next;
                     seeds.push(thread);
                 }
@@ -774,6 +810,23 @@ fn decode(data: &[u8], pos: usize, end: usize) -> (u32, usize) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_case_insensitive_mode_folds_the_ascii_letters() {
+        let data = b"Hello World\n";
+        let sensitive = Regex::new("world").unwrap();
+        assert!(sensitive.find(data, 0..data.len()).unwrap().is_none());
+        let insensitive = Regex::new_ignorecase("world").unwrap();
+        let found = insensitive.find(data, 0..data.len()).unwrap().unwrap();
+        assert_eq!(found.range, 6..11);
+        // The named classes keep their case, like POSIX: the folded input
+        // never matches a lowercase class.
+        let lower = Regex::new_ignorecase("[[:lower:]]+").unwrap();
+        let found = lower.find(data, 0..data.len()).unwrap().unwrap();
+        assert_eq!(found.range, 1..5);
+    }
+
     use super::*;
 
     fn find(pattern: &str, data: &[u8]) -> Option<Match> {
