@@ -279,6 +279,12 @@ enum Pending {
     },
     Z,
     Window,
+    /// Native insert mode `<C-x>` prefix for the slide actions.
+    InsertSlide,
+    /// Native `[`/`]` prefix for the bracket and parenthesis motions.
+    Bracket {
+        closing: bool,
+    },
     Mark,
     MacroRecord,
     MacroPlay,
@@ -3357,6 +3363,30 @@ impl Editor {
                 return Err(EditorError("text object expected".into()));
             }
             Pending::G => return self.g_key(key),
+            Pending::InsertSlide => {
+                let action = match key {
+                    Key::Ctrl('e') => Some(NativeAction::WindowSlideUp),
+                    Key::Ctrl('y') => Some(NativeAction::WindowSlideDown),
+                    _ => None,
+                };
+                let Some(action) = action else {
+                    return Err(EditorError("unknown insert window command".into()));
+                };
+                return self.invoke_native_action(action);
+            }
+            Pending::Bracket { closing } => {
+                let action = match (closing, key) {
+                    (false, Key::Char('{')) => Some(NativeAction::CursorBlockStart),
+                    (false, Key::Char('(')) => Some(NativeAction::CursorParenthesisStart),
+                    (true, Key::Char('}')) => Some(NativeAction::CursorBlockEnd),
+                    (true, Key::Char(')')) => Some(NativeAction::CursorParenthesisEnd),
+                    _ => None,
+                };
+                let Some(action) = action else {
+                    return Err(EditorError("unknown bracket motion".into()));
+                };
+                return self.invoke_native_action(action);
+            }
             Pending::Z => {
                 return match key {
                     Key::Char('t') => self.invoke_native_action(NativeAction::WindowRedrawTop),
@@ -3520,6 +3550,8 @@ impl Editor {
             Key::Char('"') => {
                 self.pending = Pending::Register;
             }
+            Key::Char('[') => self.pending = Pending::Bracket { closing: false },
+            Key::Char(']') => self.pending = Pending::Bracket { closing: true },
             Key::Char('\'') => self.pending = Pending::Mark,
             Key::Char('m') => {
                 let name = std::mem::replace(&mut self.selected_mark, '\'');
@@ -3553,7 +3585,7 @@ impl Editor {
                 }
                 self.sync_set_to_primary();
             }
-            Key::Char('_') if self.is_visual() => {
+            Key::Char('_') => {
                 let data = self.text.to_vec();
                 if !self
                     .selection_set
@@ -3754,7 +3786,7 @@ impl Editor {
                 let count = self.take_count();
                 self.history_move(true, count)?;
             }
-            Key::Ctrl('z') if self.mode == Mode::Normal => {
+            Key::Ctrl('z') => {
                 return self.invoke_native_action(NativeAction::EditorSuspend);
             }
             Key::Char('v' | 'V') => {
@@ -4240,6 +4272,12 @@ impl Editor {
             }
             Key::Char('<') => return self.jumplist_navigate(-1),
             Key::Char('>') => return self.jumplist_navigate(1),
+            Key::Char('-') => return self.invoke_native_action(NativeAction::Earlier),
+            Key::Char('+') => return self.invoke_native_action(NativeAction::Later),
+            Key::Char('|') => return self.invoke_native_action(NativeAction::CursorColumn),
+            Key::Char('o') => return self.invoke_native_action(NativeAction::CursorByte),
+            Key::Char('H') => return self.invoke_native_action(NativeAction::CursorByteLeft),
+            Key::Char('L') => return self.invoke_native_action(NativeAction::CursorByteRight),
             Key::Char('U') => return self.selection_case(CaseFold::Upper),
             Key::Char('u') => return self.selection_case(CaseFold::Lower),
             Key::Char('~') => return self.selection_case(CaseFold::Toggle),
@@ -4826,6 +4864,17 @@ impl Editor {
                 }
                 return Err(EditorError("digraph character expected".into()));
             }
+            Pending::InsertSlide => {
+                let action = match key {
+                    Key::Ctrl('e') => Some(NativeAction::WindowSlideUp),
+                    Key::Ctrl('y') => Some(NativeAction::WindowSlideDown),
+                    _ => None,
+                };
+                let Some(action) = action else {
+                    return Err(EditorError("unknown insert window command".into()));
+                };
+                return self.invoke_native_action(action);
+            }
             Pending::VerbatimStart => {
                 self.pending = match key {
                     Key::Char('u') => Pending::Verbatim {
@@ -5092,6 +5141,28 @@ impl Editor {
             Key::Down => self.cursor = motion::line_down(&data, self.cursor),
             Key::Home => self.cursor = motion::line_begin(&data, self.cursor),
             Key::End => self.cursor = motion::line_end(&data, self.cursor),
+            // Native readline bindings move the cursor without inserting.
+            Key::Ctrl('a') => self.cursor = motion::line_begin(&data, self.cursor),
+            Key::Ctrl('e') => self.cursor = motion::line_end(&data, self.cursor),
+            Key::ShiftLeft => {
+                self.cursor = motion::longword_start_prev(&data, self.cursor);
+            }
+            Key::ShiftRight => {
+                self.cursor = motion::longword_start_next(&data, self.cursor);
+            }
+            Key::PageUp => return self.invoke_native_action(NativeAction::WindowPageUp),
+            Key::PageDown => return self.invoke_native_action(NativeAction::WindowPageDown),
+            Key::ShiftPageUp => {
+                return self.invoke_native_action(NativeAction::WindowHalfpageUp);
+            }
+            Key::ShiftPageDown => {
+                return self.invoke_native_action(NativeAction::WindowHalfpageDown);
+            }
+            Key::Ctrl('z') => return self.invoke_native_action(NativeAction::EditorSuspend),
+            Key::Ctrl('x') => {
+                self.pending = Pending::InsertSlide;
+                return Ok(EditorAction::Continue);
+            }
             Key::Ctrl('r') => self.pending = Pending::InsertRegister,
             Key::Ctrl('k') => {
                 self.pending = Pending::InsertDigraph;

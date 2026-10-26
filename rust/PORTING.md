@@ -107,6 +107,16 @@ view and the cursor together like native `view_scroll_page_up`,
 cursor that leaves the visible body is centered on the page like native
 `view_cursors_to`, while line motions keep scrolling the view row by row.
 
+The native default key tables are wired. A host test parses `config.def.h`,
+resolves every one of the 208 bindings to the key sequence it stands for and
+drives a fresh editor in the mode the native table applies to, so a missing
+default key fails the suite. The bindings added last are the bracket and
+parenthesis motions (`[{`, `]}`, `[(`, `])`), the byte and column motions
+(`go`, `gH`, `gL`, `g|`), the history jumps (`g-`, `g+`), the selections trim
+(`_`), suspend in every mode (`<C-z>`) and the readline and window bindings in
+insert mode (`<C-a>`, `<C-e>`, `<S-Left>`, `<S-Right>`, `<PageUp>`,
+`<PageDown>`, `<S-PageUp>`, `<S-PageDown>`, `<C-x><C-e>`, `<C-x><C-y>`).
+
 The vis-rs terminal backend restores settings and screen on normal exit, error,
 catchable termination signals at event-loop boundaries, and suspend/resume.
 Running shell process groups respond to external SIGINT/SIGTERM with bounded
@@ -120,8 +130,8 @@ function mappings and syntax styles are now implemented; see
 [`LUA_PORTING.md`](LUA_PORTING.md) for their bounded verification and remaining
 API gaps. Stable logical selection identities and per-window last-visual marks
 now survive focus and undo. Real modal prompt windows, mixed editable history and recursive aliases are
-also implemented. Still incomplete: all original action/option bindings beyond the fixture
-corpus, some pending-operator combinations, case/completion operations,
+also implemented. Still incomplete: option bindings beyond the fixture corpus,
+some pending-operator combinations, case/completion operations,
 paste dot-repeat and the history state notification. Viewport/page motions, custom wrapping, precise Unicode widths and stable
 viewport anchors across edits also require work. Default build/install/packaging
 migration and remaining helper integration are pending. Core piece lookup/editing
@@ -420,7 +430,8 @@ and no unsupported action.
 Window motions clamp to the last row that holds source cells rather than the
 virtual EOF cursor row, matching native `L` in short files.
 
-Verification: eleven host tests in `rust/tests/viewport_motions.rs` plus
+Verification: the default binding test in `rust/tests/default_bindings.rs`,
+eleven host tests in `rust/tests/viewport_motions.rs` plus
 view-module unit tests cover row lookup, counts, source-row clamping, wrapped
 columns, wide tokens, the `H`/`L`, `gj`/`gk`/`gm`/`g$` and `zt`/`zz`/`zb`
 bindings, the page, halfpage and slide geometry, the centered follow of

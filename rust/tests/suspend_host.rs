@@ -20,14 +20,14 @@ fn ctrl_z_returns_the_suspend_outcome_without_editing() {
 }
 
 #[test]
-fn suspend_does_not_fire_outside_normal_mode() {
+fn suspend_fires_in_every_mode_like_the_native_default_table() {
     let mut ws = workspace();
     ws.handle_key(Key::Char('i')).unwrap();
     assert_eq!(ws.editor.mode, Mode::Insert);
-    assert!(!matches!(
-        ws.handle_key(Key::Ctrl('z')),
-        Ok(Outcome::Suspend)
-    ));
+    // Native `bindings_basic` binds `<C-z>` in every mode, so a suspend in
+    // insert mode stops the editor like any other mode.
+    assert_eq!(ws.handle_key(Key::Ctrl('z')).unwrap(), Outcome::Suspend);
+    assert_eq!(ws.editor.mode, Mode::Insert);
 }
 
 #[test]
