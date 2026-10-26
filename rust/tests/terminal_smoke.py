@@ -93,13 +93,13 @@ class Session:
         start = 0
         for match in re.finditer(rb'\x1b(?![\[\]OP^_])', data):
             self.send(data[start:match.end()])
-            quiet = time.monotonic() + 0.04
-            deadline = time.monotonic() + 1.0
+            quiet = time.monotonic() + 0.12
+            deadline = time.monotonic() + 1.5
             while time.monotonic() < deadline:
                 before = len(self.output)
                 self.read(0.01)
                 if len(self.output) != before:
-                    quiet = time.monotonic() + 0.04
+                    quiet = time.monotonic() + 0.12
                 elif time.monotonic() >= quiet:
                     break
             start = match.end()
