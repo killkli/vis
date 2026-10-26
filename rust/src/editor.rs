@@ -570,6 +570,9 @@ pub struct Editor {
     /// First display row the next frame should show, set by scroll actions.
     /// Consumed after one render so later cursor motions auto-follow again.
     scroll_request: Option<usize>,
+    /// Native `view->start_mark`: the first displayed row is tracked by a text
+    /// mark, so edits above the view keep the visible content in place.
+    view_anchor: Option<crate::text::Mark>,
     buffer_state: BufferState,
     selected_mark: char,
     session: sam::Session,
@@ -666,6 +669,7 @@ impl Editor {
                 top: 0,
             },
             scroll_request: None,
+            view_anchor: None,
             buffer_state: BufferState::default(),
             selected_mark: '\'',
             session: sam::Session::new(),
@@ -1866,6 +1870,37 @@ impl Editor {
     /// one-shot: the workspace clears it after rendering.
     pub fn request_scroll(&mut self, top: usize) {
         self.scroll_request = Some(top);
+    }
+
+    /// Row the anchored first display line occupies in the current text.
+    pub fn view_anchor_row(&self) -> Option<usize> {
+        let mark = self.view_anchor.as_ref()?;
+        let byte = self.text.mark_get(mark.clone())?;
+        let data = self.text.to_vec();
+        let columns = self.viewport.width.max(1);
+        let (row, _) = crate::view::screen_position(&data, byte, columns, self.tab_width);
+        Some(row)
+    }
+
+    /// Anchor the first display line at a row of the current text.
+    pub fn set_view_anchor(&mut self, row: usize) {
+        let data = self.text.to_vec();
+        let columns = self.viewport.width.max(1);
+        let Some(byte) = crate::view::row_start(&data, row, columns, self.tab_width) else {
+            self.view_anchor = None;
+            return;
+        };
+        self.view_anchor = self.text.mark(byte);
+    }
+
+    /// Move the anchor out of the editor, for a window that loses the focus.
+    pub fn take_view_anchor(&mut self) -> Option<crate::text::Mark> {
+        self.view_anchor.take()
+    }
+
+    /// Restore the anchor of a window that gains the focus.
+    pub fn install_view_anchor(&mut self, anchor: Option<crate::text::Mark>) {
+        self.view_anchor = anchor;
     }
 
     pub fn scroll_request(&self) -> Option<usize> {

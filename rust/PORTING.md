@@ -107,6 +107,11 @@ view and the cursor together like native `view_scroll_page_up`,
 cursor that leaves the visible body is centered on the page like native
 `view_cursors_to`, while line motions keep scrolling the view row by row.
 
+The first visible row is anchored to its content with a text mark, like native
+`view->start_mark`, so edits above the view keep the visible text in place
+instead of moving the window. The anchor travels with the window while it is
+unfocused and is dropped when its line disappears.
+
 The native default key tables are wired. A host test parses `config.def.h`,
 resolves every one of the 208 bindings to the key sequence it stands for and
 drives a fresh editor in the mode the native table applies to, so a missing
@@ -132,8 +137,8 @@ API gaps. Stable logical selection identities and per-window last-visual marks
 now survive focus and undo. Real modal prompt windows, mixed editable history and recursive aliases are
 also implemented. Still incomplete: option bindings beyond the fixture corpus,
 some pending-operator combinations, case/completion operations,
-paste dot-repeat and the history state notification. Viewport/page motions, custom wrapping, precise Unicode widths and stable
-viewport anchors across edits also require work. Default build/install/packaging
+paste dot-repeat and the history state notification. Custom wrapping and precise
+Unicode widths also require work. Default build/install/packaging
 migration and remaining helper integration are pending. Core piece lookup/editing
 is linear in piece count; UI frames still flatten buffers and repaint visible
 cells. Existing C builds remain the default.
@@ -430,7 +435,8 @@ and no unsupported action.
 Window motions clamp to the last row that holds source cells rather than the
 virtual EOF cursor row, matching native `L` in short files.
 
-Verification: the default binding test in `rust/tests/default_bindings.rs`,
+Verification: the anchor tests in `rust/tests/view_anchor.rs`, the default
+binding test in `rust/tests/default_bindings.rs`,
 eleven host tests in `rust/tests/viewport_motions.rs` plus
 view-module unit tests cover row lookup, counts, source-row clamping, wrapped
 columns, wide tokens, the `H`/`L`, `gj`/`gk`/`gm`/`g$` and `zt`/`zz`/`zb`

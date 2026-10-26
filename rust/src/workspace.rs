@@ -87,6 +87,9 @@ struct ViewState {
     jumplist: Box<JumpList<Mode>>,
     /// Last measured body geometry for viewport motions.
     viewport: Option<crate::view::ViewportMetrics>,
+    /// Native `view->start_mark` of this window: the first displayed row is
+    /// tracked by a text mark while the window is unfocused.
+    anchor: Option<crate::text::Mark>,
 }
 
 impl ViewState {
@@ -107,6 +110,7 @@ impl ViewState {
             last_visual: Vec::new(),
             jumplist: Box::new(JumpList::new()),
             viewport: None,
+            anchor: None,
         }
     }
 
@@ -141,6 +145,7 @@ impl ViewState {
                 .collect(),
             jumplist: Box::new(editor.take_jumplist()),
             viewport: None,
+            anchor: None,
         }
     }
 
@@ -217,6 +222,8 @@ pub struct Frame {
     pub tab_width: usize,
     /// First display row the next frame should show (one-shot scroll request).
     pub topline: Option<usize>,
+    /// First display row of the anchored view line, when the text moved it.
+    pub anchor: Option<usize>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -388,6 +395,7 @@ impl Workspace {
         let viewport = self.windows[self.active].view.viewport;
         let mut view = ViewState::capture(&mut self.editor);
         view.viewport = viewport;
+        view.anchor = self.editor.take_view_anchor();
         self.windows[self.active].view = view;
     }
 
@@ -441,6 +449,8 @@ impl Workspace {
             .map_err(|e| invalid(e.to_string()))?;
         let jumplist = std::mem::take(&mut self.windows[self.active].view.jumplist);
         self.editor.install_jumplist(*jumplist);
+        let anchor = self.windows[self.active].view.anchor.clone();
+        self.editor.install_view_anchor(anchor);
         self.editor
             .set_viewport(self.windows[self.active].view.viewport);
         Ok(())
@@ -526,6 +536,11 @@ impl Workspace {
                     },
                     topline: if active {
                         self.editor.scroll_request()
+                    } else {
+                        None
+                    },
+                    anchor: if active {
+                        self.editor.view_anchor_row()
                     } else {
                         None
                     },

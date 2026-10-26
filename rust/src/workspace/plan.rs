@@ -2024,6 +2024,9 @@ impl Workspace {
         self.windows[index].view.viewport = Some(viewport);
         if index == self.active {
             self.editor.set_viewport(Some(viewport));
+            // Native `view->start_mark` keeps the visible content in place
+            // when the text changes above the view.
+            self.editor.set_view_anchor(viewport.top);
         }
     }
     pub fn window_selection_range(

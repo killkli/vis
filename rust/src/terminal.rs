@@ -53,6 +53,9 @@ pub struct RenderView<'a> {
     pub prompt_executing: bool,
     /// First display row to show for this frame, before cursor auto-follow.
     pub topline: Option<usize>,
+    /// First display row of the anchored view line. Native `view->start_mark`
+    /// keeps the visible content in place when the text changes above it.
+    pub anchor: Option<usize>,
     /// Full prompt including its `:`, `/` or `?` prefix.
     pub prompt: Option<&'a str>,
 }
@@ -520,6 +523,7 @@ impl Terminal {
                 display: WindowDisplay::default(),
                 prompt_executing: false,
                 topline: None,
+                anchor: None,
                 prompt: prompt.as_deref(),
             }],
             0,
@@ -1188,6 +1192,7 @@ fn compose_views_decorated(
             view.display,
             &overlay,
             view.topline,
+            view.anchor,
         );
         let body = region
             .height
@@ -1321,6 +1326,7 @@ impl Viewport {
             WindowDisplay::default(),
             &OverlayContext::default(),
             None,
+            None,
         )
     }
 
@@ -1339,9 +1345,14 @@ impl Viewport {
         display: WindowDisplay,
         overlay: &OverlayContext,
         requested_top: Option<usize>,
+        anchor: Option<usize>,
     ) -> PanelFrame {
         let (columns, rows) = (region.width, region.height);
         let body = rows.saturating_sub(usize::from(display.statusbar));
+        // The anchored line is the first visible row of the previous frame,
+        // tracked by a text mark so that edits above the view keep the
+        // visible content in place.
+        self.top = anchor.unwrap_or(self.top);
         if let Some(previous) = &self.geometry {
             // Growing a window exposes preceding rows, including the history
             // above an expanded one-line prompt, while preserving its cursor.
@@ -2073,6 +2084,7 @@ mod tests {
             display: WindowDisplay::default(),
             prompt_executing: false,
             topline: None,
+            anchor: None,
             prompt: None,
         }
     }
@@ -2622,6 +2634,7 @@ mod tests {
             WindowDisplay::default(),
             &OverlayContext::default(),
             Some(2),
+            None,
         );
         assert!(panel.text.contains("\x1b[1;1H"));
         assert!(!panel.text.contains("a "), "row zero is scrolled away");
@@ -2642,6 +2655,7 @@ mod tests {
             WindowDisplay::default(),
             &OverlayContext::default(),
             Some(9),
+            None,
         );
         assert!(!panel.text.contains('a'));
         assert_eq!(viewport.top, 4);

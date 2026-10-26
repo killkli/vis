@@ -782,6 +782,7 @@ fn render_views(frames: &[vis::workspace::Frame]) -> Vec<vis::terminal::RenderVi
             display: frame.display,
             prompt_executing: frame.prompt_executing,
             topline: frame.topline,
+            anchor: frame.anchor,
             tab_width: frame.tab_width,
         })
         .collect()
