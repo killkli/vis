@@ -23,7 +23,7 @@ def lua_string(value):
 def build_harness(directory):
     source = directory / "main.rs"
     modules = "".join(f"#[path={json.dumps(str(ROOT / 'rust/src' / (name + '.rs')))}] mod {name};\n"
-                      for name in ["text", "motion", "regex", "sam"])
+                      for name in ["text", "width", "motion", "regex", "sam"])
     source.write_text("#![forbid(unsafe_code)]\n#![allow(dead_code)]\n" + modules + r'''
 fn main() {
     let args: Vec<_> = std::env::args().collect();

@@ -79,6 +79,10 @@ BUILTINS = [
     ("set-multiple-options", b"abc\n", ":set et tw=4<Enter>i<Tab>X<Escape>"),
     ("set-value", b"abc\n", ":set tabwidth 4<Enter>:set et<Enter>i<Tab>X<Escape>"),
     ("set-toggle", b"abc\n", ":set et<Enter>:set et!<Enter>i<Tab>X<Escape>"),
+    ("operator-search-forward", b"one two three\nfour five\nsix seven\n", "d/wo<Enter>"),
+    ("operator-search-backward-change", b"a.b c.d\ne.f g.h\n", "c?e<Enter>X<Escape>"),
+    ("named-register-motion", b"one two three\nfour five\n", "\"ad2w"),
+    ("append-register-motion", b"one two three\nfour five\n", "\"ayy\"Ayy"),
     ("percent-scans-forward", b"alpha.beta, gamma_delta (x) [y] {z}\n", "d%"),
 ]
 
