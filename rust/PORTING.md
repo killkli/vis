@@ -112,6 +112,13 @@ The first visible row is anchored to its content with a text mark, like native
 instead of moving the window. The anchor travels with the window while it is
 unfocused and is dropped when its line disappears.
 
+The remaining native window options are accepted and reported:
+`cursorline`, `colorcolumn`, `showspaces`, `showtabs`, `shownewlines` and
+`wrapcolumn`. The `wrapcolumn` option wraps the text at the smaller of the
+window width and the option, like native `view_max_text_width`; the native
+`cursorline` and `colorcolumn` options are stored but never drawn by the
+native editor either.
+
 The native `numbers`, `relativenumbers` and `numberwidth` options draw the
 line number sidebar: the number of every visible row, right aligned in front of
 the text, with the distance to the cursor line for the relative variant. The
@@ -197,9 +204,11 @@ Known compatibility differences and limits:
   in-place write can leave partial data. Explicit atomic replacement preserves
   Unix owner/group/mode, rejects linked files, and does not copy ACLs/xattrs.
   Conflict checks are best effort, not filesystem locks.
-* The native `cursorline` and `colorcolumn` options and the replacement
-  symbols of `showspaces`, `showtabs` and `shownewlines` are not drawn yet;
-  the native symbol options come from the syntax layer.
+* The native `cursorline` and `colorcolumn` options are accepted and
+  reported but not drawn, like the native editor, which stores them without
+  using them. The replacement symbols of `showspaces`, `showtabs` and
+  `shownewlines` are not drawn yet; the native symbol options come from the
+  syntax layer.
 * Display widths follow the Unicode character database: characters in the
   combining and format categories occupy no column, characters with an East
   Asian width of `Wide` or `Fullwidth` occupy two. The tables are generated
@@ -461,8 +470,8 @@ and no unsupported action.
 Window motions clamp to the last row that holds source cells rather than the
 virtual EOF cursor row, matching native `L` in short files.
 
-Verification: the option tests in `rust/tests/global_options.rs` and
-`rust/tests/numbers_options.rs`, the anchor
+Verification: the option tests in `rust/tests/global_options.rs`,
+`rust/tests/numbers_options.rs` and `rust/tests/window_options.rs`, the anchor
 tests in `rust/tests/view_anchor.rs`, the default
 binding test in `rust/tests/default_bindings.rs`,
 eleven host tests in `rust/tests/viewport_motions.rs` plus

@@ -6391,6 +6391,15 @@ impl Editor {
                 | "rnu"
                 | "numberwidth"
                 | "nuw"
+                | "cursorline"
+                | "cul"
+                | "colorcolumn"
+                | "cc"
+                | "showspaces"
+                | "showtabs"
+                | "shownewlines"
+                | "wrapcolumn"
+                | "wc"
         ) {
             return None;
         }

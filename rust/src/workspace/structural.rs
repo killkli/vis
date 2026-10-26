@@ -203,6 +203,43 @@ impl Workspace {
                     .ok_or_else(|| invalid("number width must be a number"))?;
                 self.set_window_display(window, display)?;
             }
+            "cursorline" | "cul" | "showspaces" | "showtabs" | "shownewlines" => {
+                let mut display = self
+                    .window_display(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                let current = match name {
+                    "cursorline" | "cul" => display.cursorline,
+                    "showspaces" => display.showspaces,
+                    "showtabs" => display.showtabs,
+                    _ => display.shownewlines,
+                };
+                let enabled = boolean(current)?;
+                match name {
+                    "cursorline" | "cul" => display.cursorline = enabled,
+                    "showspaces" => display.showspaces = enabled,
+                    "showtabs" => display.showtabs = enabled,
+                    _ => display.shownewlines = enabled,
+                }
+                self.set_window_display(window, display)?;
+            }
+            "colorcolumn" | "cc" => {
+                let mut display = self
+                    .window_display(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                display.colorcolumn = value
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or_else(|| invalid("color column must be a number"))?;
+                self.set_window_display(window, display)?;
+            }
+            "wrapcolumn" | "wc" => {
+                let mut display = self
+                    .window_display(window)
+                    .ok_or_else(|| invalid("closed window"))?;
+                display.wrapcolumn = value
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .ok_or_else(|| invalid("wrap column must be a number"))?;
+                self.set_window_display(window, display)?;
+            }
             _ => return Err(invalid(format!("unsupported option: {name}"))),
         }
         self.set_window_options(window, width, expand, auto)?;

@@ -52,6 +52,18 @@ pub struct WindowDisplay {
     pub relativenumbers: bool,
     /// Native `numberwidth` option: the minimum sidebar width.
     pub numberwidth: usize,
+    /// Native `cursorline` option: highlight the row of the cursor.
+    pub cursorline: bool,
+    /// Native `colorcolumn` option: highlight a fixed column.
+    pub colorcolumn: usize,
+    /// Native `showspaces` option: show a replacement symbol for spaces.
+    pub showspaces: bool,
+    /// Native `showtabs` option: show a replacement symbol for tabs.
+    pub showtabs: bool,
+    /// Native `shownewlines` option: show a replacement symbol for newlines.
+    pub shownewlines: bool,
+    /// Native `wrapcolumn` option: wrap the text at this column.
+    pub wrapcolumn: usize,
 }
 
 impl Default for WindowDisplay {
@@ -63,6 +75,12 @@ impl Default for WindowDisplay {
             numbers: false,
             relativenumbers: false,
             numberwidth: 0,
+            cursorline: false,
+            colorcolumn: 0,
+            showspaces: false,
+            showtabs: false,
+            shownewlines: false,
+            wrapcolumn: 0,
         }
     }
 }
@@ -234,6 +252,8 @@ pub struct Frame {
     pub topline: Option<usize>,
     /// First display row of the anchored view line, when the text moved it.
     pub anchor: Option<usize>,
+    /// Native `wrapcolumn` option: wrap the text at this column.
+    pub wrapcolumn: usize,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -554,6 +574,7 @@ impl Workspace {
                     } else {
                         None
                     },
+                    wrapcolumn: window.display.wrapcolumn,
                 }
             })
             .collect()

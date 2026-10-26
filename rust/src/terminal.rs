@@ -56,6 +56,8 @@ pub struct RenderView<'a> {
     /// First display row of the anchored view line. Native `view->start_mark`
     /// keeps the visible content in place when the text changes above it.
     pub anchor: Option<usize>,
+    /// Native `wrapcolumn` option: wrap the text at this column.
+    pub wrapcolumn: usize,
     /// Full prompt including its `:`, `/` or `?` prefix.
     pub prompt: Option<&'a str>,
 }
@@ -533,6 +535,7 @@ impl Terminal {
                 prompt_executing: false,
                 topline: None,
                 anchor: None,
+                wrapcolumn: 0,
                 prompt: prompt.as_deref(),
             }],
             0,
@@ -1379,7 +1382,14 @@ impl Viewport {
         let sidebar = sidebar_columns(data, self.top, body, layout_columns, tab_width, &display);
         self.sidebar_width = sidebar;
         let text_columns = columns.saturating_sub(sidebar).max(1);
-        let (cursor_row, cursor_column) = wrapped_cursor(data, cursor, text_columns, tab_width);
+        // Native `view_max_text_width`: the text wraps at the smaller of the
+        // window width and the `wrapcolumn` option.
+        let wrap_columns = if display.wrapcolumn > 0 {
+            display.wrapcolumn.min(text_columns)
+        } else {
+            text_columns
+        };
+        let (cursor_row, cursor_column) = wrapped_cursor(data, cursor, wrap_columns, tab_width);
         let cursor_line =
             crate::view::line_number_at_row(data, cursor_row, text_columns, tab_width).unwrap_or(1);
         let numbers = line_numbers(
@@ -1425,7 +1435,16 @@ impl Viewport {
             decorations.or_else(|| (!fallback.operations.is_empty()).then_some(&fallback));
         if let Some(styles) = decorations.filter(|styles| !styles.operations.is_empty()) {
             let text = ordered_panel(
-                data, self.top, selections, region, tab_width, display, styles, overlay, &numbers,
+                data,
+                self.top,
+                selections,
+                region,
+                tab_width,
+                display,
+                styles,
+                overlay,
+                &numbers,
+                wrap_columns,
             );
             return PanelFrame {
                 text,
@@ -1443,7 +1462,7 @@ impl Viewport {
         let mut frame = String::from("\x1b[0m");
         let visible = wrapped_rows_decorated(
             data,
-            text_columns,
+            wrap_columns,
             tab_width,
             self.top..self.top + body,
             selections,
@@ -1630,12 +1649,14 @@ fn ordered_panel(
     decorations: &ViewDecorations,
     overlay: &OverlayContext,
     numbers: &LineNumbers,
+    wrap_width: usize,
 ) -> String {
     let width = region.width;
     let height = region.height;
     let body_height = height.saturating_sub(usize::from(display.statusbar));
     let sidebar = numbers.width;
     let text_width = width.saturating_sub(sidebar).max(1);
+    let wrap_width = wrap_width.max(1).min(text_width);
     let base = decorations
         .base
         .unwrap_or_else(|| resolved_style(Some(decorations), 0));
@@ -1657,7 +1678,7 @@ fn ordered_panel(
     let mut last_source = None;
     let mut source_position = 0;
     let mut visible_start = None;
-    walk_cells(data, text_width, tab_width, |cell| {
+    walk_cells(data, wrap_width, tab_width, |cell| {
         let file_bytes = if last_source == Some(cell.pos) {
             0
         } else {
@@ -2274,6 +2295,7 @@ mod tests {
             display: WindowDisplay::default(),
             prompt_executing: false,
             topline: None,
+            wrapcolumn: 0,
             anchor: None,
             prompt: None,
         }
@@ -2597,6 +2619,7 @@ mod tests {
             &decoration,
             &OverlayContext::default(),
             &LineNumbers::none(),
+            region.width,
         );
         assert!(frame.contains("\x1b[2;4;32;41ma"), "{frame:?}");
         assert!(frame.contains("\x1b[33;47mL"), "{frame:?}");
@@ -2617,6 +2640,7 @@ mod tests {
             &decoration,
             &OverlayContext::default(),
             &LineNumbers::none(),
+            region.width,
         );
         assert!(
             frame.contains("\x1b[2;1H\x1b[0m\x1b[36;47mZ   "),
@@ -2652,6 +2676,7 @@ mod tests {
             &decoration,
             &OverlayContext::default(),
             &LineNumbers::none(),
+            region.width,
         );
         assert!(
             tab.contains("\x1b[1;31;40m \x1b[0m\x1b[37;40m      Z"),
@@ -2667,6 +2692,7 @@ mod tests {
             &decoration,
             &OverlayContext::default(),
             &LineNumbers::none(),
+            region.width,
         );
         assert!(
             control.contains("\x1b[1;31;40m^A\x1b[0m\x1b[37;40mZ"),
@@ -2686,6 +2712,7 @@ mod tests {
             &decoration,
             &OverlayContext::default(),
             &LineNumbers::none(),
+            region.width,
         );
         assert!(!eof.contains("31;40m"), "{eof:?}");
     }
@@ -2714,6 +2741,7 @@ mod tests {
             &decoration,
             &OverlayContext::default(),
             &LineNumbers::none(),
+            12,
         );
         assert!(
             frame.contains("\x1b[3;31;47m       \x1b[0m\x1b[1;34;47mZ"),
@@ -2808,6 +2836,40 @@ mod tests {
         assert_eq!(viewports.len(), 1);
         assert!(viewports.contains_key(&2));
         assert!(compose_views(&mut viewports, &[], 2, Layout::Horizontal, "", (1, 1)).is_err());
+    }
+
+    #[test]
+    fn the_wrap_column_option_wraps_the_text_earlier() {
+        let data = b"abcdefghijklmnopqrstuvwxyz\n";
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 4,
+        };
+        let mut viewport = Viewport::default();
+        let display = WindowDisplay {
+            wrapcolumn: 10,
+            ..WindowDisplay::default()
+        };
+        let panel = viewport.panel_decorated(
+            data,
+            0,
+            &[],
+            "s",
+            None,
+            region,
+            true,
+            8,
+            None,
+            display,
+            &OverlayContext::default(),
+            None,
+            None,
+        );
+        // Native `view_max_text_width` wraps the text at the column.
+        assert!(panel.text.contains("abcdefghij"), "{:?}", panel.text);
+        assert!(panel.text.contains("klmnopqrst"), "{:?}", panel.text);
     }
 
     #[test]

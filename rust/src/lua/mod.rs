@@ -730,9 +730,9 @@ impl Inner {
         match name {
             "autoindent" | "ai" | "shell" | "escdelay" => Some(OptionScope::Global),
             "tabwidth" | "tw" | "expandtab" | "et" | "oneline" | "statusbar" | "showeof"
-            | "numbers" | "nu" | "relativenumbers" | "rnu" | "numberwidth" | "nuw" => {
-                Some(OptionScope::Window)
-            }
+            | "numbers" | "nu" | "relativenumbers" | "rnu" | "numberwidth" | "nuw"
+            | "cursorline" | "cul" | "colorcolumn" | "cc" | "showspaces" | "showtabs"
+            | "shownewlines" | "wrapcolumn" | "wc" => Some(OptionScope::Window),
             _ => None,
         }
     }
@@ -803,12 +803,24 @@ impl Inner {
                         Some(display) => Value::Integer(display.numberwidth as i64),
                         None => Value::Nil,
                     },
+                    "colorcolumn" | "cc" => match ws.window_display(id) {
+                        Some(display) => Value::Integer(display.colorcolumn as i64),
+                        None => Value::Nil,
+                    },
+                    "wrapcolumn" | "wc" => match ws.window_display(id) {
+                        Some(display) => Value::Integer(display.wrapcolumn as i64),
+                        None => Value::Nil,
+                    },
                     _ => match ws.window_display(id) {
                         Some(display) => Value::Boolean(match name {
                             "oneline" => display.oneline,
                             "statusbar" => display.statusbar,
                             "numbers" | "nu" => display.numbers,
                             "relativenumbers" | "rnu" => display.relativenumbers,
+                            "cursorline" | "cul" => display.cursorline,
+                            "showspaces" => display.showspaces,
+                            "showtabs" => display.showtabs,
+                            "shownewlines" => display.shownewlines,
                             _ => display.showeof,
                         }),
                         None => Value::Nil,
@@ -915,7 +927,18 @@ impl Inner {
         let mut ws = self.workspace.borrow_mut();
         if matches!(
             name,
-            "oneline" | "statusbar" | "showeof" | "numbers" | "nu" | "relativenumbers" | "rnu"
+            "oneline"
+                | "statusbar"
+                | "showeof"
+                | "numbers"
+                | "nu"
+                | "relativenumbers"
+                | "rnu"
+                | "cursorline"
+                | "cul"
+                | "showspaces"
+                | "showtabs"
+                | "shownewlines"
         ) {
             let Some(mut display) = ws.window_display(id) else {
                 return Ok(false);
@@ -945,6 +968,34 @@ impl Inner {
                         truth(&value)
                     };
                 }
+                "cursorline" | "cul" => {
+                    display.cursorline = if toggle {
+                        !display.cursorline
+                    } else {
+                        truth(&value)
+                    };
+                }
+                "showspaces" => {
+                    display.showspaces = if toggle {
+                        !display.showspaces
+                    } else {
+                        truth(&value)
+                    };
+                }
+                "showtabs" => {
+                    display.showtabs = if toggle {
+                        !display.showtabs
+                    } else {
+                        truth(&value)
+                    };
+                }
+                "shownewlines" => {
+                    display.shownewlines = if toggle {
+                        !display.shownewlines
+                    } else {
+                        truth(&value)
+                    };
+                }
                 _ => {
                     let current = if relative {
                         display.relativenumbers
@@ -960,13 +1011,21 @@ impl Inner {
                 .map_err(mlua::Error::external)?;
             return Ok(true);
         }
-        if matches!(name, "numberwidth" | "nuw") {
+        if matches!(
+            name,
+            "numberwidth" | "nuw" | "colorcolumn" | "cc" | "wrapcolumn" | "wc"
+        ) {
             let Some(mut display) = ws.window_display(id) else {
                 return Ok(false);
             };
-            display.numberwidth = exact_integer(&value)
-                .ok_or_else(|| mlua::Error::runtime("number width must be a number"))?
+            let number = exact_integer(&value)
+                .ok_or_else(|| mlua::Error::runtime("option value must be a number"))?
                 as usize;
+            match name {
+                "numberwidth" | "nuw" => display.numberwidth = number,
+                "colorcolumn" | "cc" => display.colorcolumn = number,
+                _ => display.wrapcolumn = number,
+            }
             ws.set_window_display(id, display)
                 .map_err(mlua::Error::external)?;
             return Ok(true);
@@ -3453,8 +3512,12 @@ const NATIVE_COMMANDS: &[&str] = &[
 fn builtin_option_kind(name: &str) -> Option<OptionKind> {
     match name {
         "tabwidth" | "tw" => Some(OptionKind::Number),
-        "expandtab" | "et" | "autoindent" | "ai" | "oneline" | "statusbar" | "showeof" => {
+        "expandtab" | "et" | "autoindent" | "ai" | "oneline" | "statusbar" | "showeof"
+        | "cursorline" | "cul" | "showspaces" | "showtabs" | "shownewlines" => {
             Some(OptionKind::Bool)
+        }
+        "numberwidth" | "nuw" | "colorcolumn" | "cc" | "wrapcolumn" | "wc" => {
+            Some(OptionKind::Number)
         }
         _ => None,
     }
