@@ -145,7 +145,10 @@ def run(binary):
             assert b"\x1b[12;1H" in session.output, "horizontal status row missing"
             raw(session, b":vsplit\riX")
             settle(session)
-            assert b"\x1b[1;26H|" in session.output and b"\x1b[1;52H|" in session.output, "vertical separators missing"
+            # The separator may carry a style, so look past the escape
+            # sequences between the position and the character.
+            separator = re.compile(rb"\x1b\[1;(26|52)H(?:\x1b\[[0-9;]*m)*\|")
+            assert separator.search(session.output), "vertical separators missing"
             escape(session)
             raw(session, b":w\r:qall!\r")
             session.finish()
