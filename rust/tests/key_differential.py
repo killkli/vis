@@ -28,6 +28,7 @@ import errno
 import fcntl
 import os
 from pathlib import Path
+import re
 import select
 import shlex
 import shutil
@@ -61,6 +62,16 @@ DEFAULT_FIXTURES = [
     "test/vim/operators/change/change.keys",
     "test/vim/motions/goto.keys",
 ]
+
+FEEDKEYS_UNREPRESENTABLE = {"delete", "del", "insert", "ins"}
+
+
+def unrepresentable_feedkeys_token(keys):
+    """Return a named key token C `vis:feedkeys` cannot preserve distinctly."""
+    for match in re.finditer(r"<([^<>]+)>", keys):
+        if match.group(1).lower() in FEEDKEYS_UNREPRESENTABLE:
+            return match.group(1)
+    return None
 
 # Lua vis:feedkeys intentionally disables macro recording. The upstream Vim
 # harness uses native terminal input, so these fixtures require a PTY oracle.
@@ -547,6 +558,11 @@ def run_cases(args):
     counts = dict.fromkeys(["PASS", "FAIL", "UNSUPPORTED", "ERROR"], 0)
     if not args.fixtures:
         for name, data, keys in BUILTINS:
+            token = unrepresentable_feedkeys_token(keys)
+            if token:
+                print(f"UNSUPPORTED {name}: C vis:feedkeys cannot express <{token}> as a key")
+                counts["UNSUPPORTED"] += 1
+                continue
             try:
                 counts[compare(args, name, data, keys)] += 1
             except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as error:
@@ -563,8 +579,14 @@ def run_cases(args):
             print(f"UNSUPPORTED {name}: input fixture is disabled upstream")
             counts["UNSUPPORTED"] += 1
             continue
+        keys = normalize(fixture)
+        token = unrepresentable_feedkeys_token(keys)
+        if token:
+            print(f"UNSUPPORTED {name}: C vis:feedkeys cannot express <{token}> as a key")
+            counts["UNSUPPORTED"] += 1
+            continue
         try:
-            counts[compare(args, name, fixture.with_suffix(".in").read_bytes(), normalize(fixture), fixture)] += 1
+            counts[compare(args, name, fixture.with_suffix(".in").read_bytes(), keys, fixture)] += 1
         except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as error:
             print(f"ERROR {name}: {error}")
             counts["ERROR"] += 1
