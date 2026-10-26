@@ -757,6 +757,7 @@ impl InteractiveHost {
                     width: item.width,
                     height: item.height,
                     top: item.top,
+                    wrapcolumn: 0,
                 },
             );
         }

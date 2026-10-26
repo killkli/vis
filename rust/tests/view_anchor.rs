@@ -25,6 +25,7 @@ fn measure(ws: &mut Workspace, top: usize) {
             width: 80,
             height: 23,
             top,
+            wrapcolumn: 0,
         },
     );
 }

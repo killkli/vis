@@ -2087,8 +2087,8 @@ use crate::{
     motion,
     selection::Selection,
     view::{
-        last_row, last_source_row, position_at_with_breakat, row_start_with_breakat,
-        row_width_with_breakat, screen_position_with_breakat,
+        last_row_with_layout, last_source_row_with_layout, position_at_with_breakat,
+        row_start_with_breakat, row_width_with_breakat, screen_position_with_layout,
     },
 };
 
@@ -2864,10 +2864,11 @@ impl Editor {
         use NativeWindow as W;
         let viewport = self.viewport;
         let data = self.text.to_vec();
-        let (row, _) = screen_position_with_breakat(
+        let (row, _) = screen_position_with_layout(
             &data,
             self.cursor,
             viewport.width.max(1),
+            viewport.wrap_width(),
             self.tab_width,
             self.breakat(),
         );
@@ -2886,19 +2887,25 @@ impl Editor {
     /// counts soft-wrapped rows; every rule below mirrors the native one.
     fn native_scroll(&mut self, scroll: NativeScroll) -> Result<EditorAction, EditorError> {
         let viewport = self.viewport;
-        let columns = viewport.width.max(1);
+        let physical_columns = viewport.width.max(1);
+        let columns = viewport.wrap_width();
         let height = viewport.height.max(1);
         let tab_width = self.tab_width;
         let data = self.text.to_vec();
-        let last = last_row(&data, columns, tab_width);
-        let top = viewport.top.min(last);
-        let (cursor_row, cursor_column) =
-            screen_position_with_breakat(&data, self.cursor, columns, tab_width, self.breakat());
         let breakat = self.breakat.clone();
+        let last = last_row_with_layout(&data, physical_columns, columns, tab_width, &breakat);
+        let top = viewport.top.min(last);
+        let (cursor_row, cursor_column) = screen_position_with_layout(
+            &data,
+            self.cursor,
+            physical_columns,
+            columns,
+            tab_width,
+            &breakat,
+        );
         let row_begin = |row: usize| -> usize {
             row_start_with_breakat(&data, row, columns, tab_width, &breakat).unwrap_or(data.len())
         };
-        let breakat = self.breakat.clone();
         let row_position = |row: usize, column: usize| -> usize {
             position_at_with_breakat(&data, row, column, columns, tab_width, &breakat)
                 .unwrap_or(data.len())
@@ -3061,9 +3068,11 @@ impl Editor {
         // the bottom) unless the user supplied one.
         let bottom_count = if explicit { count } else { 0 };
         let data = self.text.to_vec();
-        let columns = viewport.width.max(1);
+        let physical_columns = viewport.width.max(1);
+        let columns = viewport.wrap_width();
         let tab_width = self.tab_width;
-        let last = last_row(&data, columns, tab_width);
+        let last =
+            last_row_with_layout(&data, physical_columns, columns, tab_width, self.breakat());
         let locate = |row: usize, column: usize| -> Option<usize> {
             if row > last {
                 return None;
@@ -3084,7 +3093,13 @@ impl Editor {
                     .unwrap_or(data.len()),
             )
         };
-        let source_last = last_source_row(&data, columns, tab_width);
+        let source_last = last_source_row_with_layout(
+            &data,
+            physical_columns,
+            columns,
+            tab_width,
+            self.breakat(),
+        );
         let locate_row = |row: usize| -> Option<usize> {
             match source_last {
                 Some(source_last) => {
@@ -3100,8 +3115,14 @@ impl Editor {
         let mut preferred = self.preferred_column;
         for selection in self.selections().to_vec() {
             let cursor = selection.cursor.min(data.len());
-            let (row, column) =
-                screen_position_with_breakat(&data, cursor, columns, tab_width, self.breakat());
+            let (row, column) = screen_position_with_layout(
+                &data,
+                cursor,
+                physical_columns,
+                columns,
+                tab_width,
+                self.breakat(),
+            );
             let desired = preferred.unwrap_or(column);
             let target = match movement {
                 M::ScreenLineBegin => locate(row, 0),

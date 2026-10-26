@@ -2041,10 +2041,11 @@ impl Workspace {
 impl Workspace {
     /// Record the UI-measured body geometry used by viewport motions. Unknown
     /// windows are ignored because a draw may finish after its window closed.
-    pub fn set_window_viewport(&mut self, id: usize, viewport: crate::view::ViewportMetrics) {
+    pub fn set_window_viewport(&mut self, id: usize, mut viewport: crate::view::ViewportMetrics) {
         let Some(index) = self.windows.iter().position(|window| window.id == id) else {
             return;
         };
+        viewport.wrapcolumn = self.windows[index].display.wrapcolumn;
         self.windows[index].view.viewport = Some(viewport);
         if index == self.active {
             self.editor.set_viewport(Some(viewport));

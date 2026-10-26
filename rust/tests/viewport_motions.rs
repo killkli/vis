@@ -10,7 +10,15 @@ fn workspace(text: &[u8]) -> Workspace {
 
 fn measure(ws: &mut Workspace, width: usize, height: usize, top: usize) {
     let id = ws.active_window_id();
-    ws.set_window_viewport(id, ViewportMetrics { width, height, top });
+    ws.set_window_viewport(
+        id,
+        ViewportMetrics {
+            width,
+            height,
+            top,
+            wrapcolumn: 0,
+        },
+    );
 }
 
 fn action(ws: &mut Workspace, action: NativeAction) {

@@ -684,6 +684,7 @@ impl Editor {
                 width: 80,
                 height: 23,
                 top: 0,
+                wrapcolumn: 0,
             },
             scroll_request: None,
             view_anchor: None,
@@ -1881,6 +1882,7 @@ impl Editor {
             width: 80,
             height: 23,
             top: 0,
+            wrapcolumn: 0,
         });
     }
 
@@ -1899,11 +1901,12 @@ impl Editor {
         let mark = self.view_anchor.as_ref()?;
         let byte = self.text.mark_get(mark.clone())?;
         let data = self.text.to_vec();
-        let columns = self.viewport.width.max(1);
-        let (row, _) = crate::view::screen_position_with_breakat(
+        let viewport = self.viewport;
+        let (row, _) = crate::view::screen_position_with_layout(
             &data,
             byte,
-            columns,
+            viewport.width,
+            viewport.wrap_width(),
             self.tab_width,
             &self.breakat,
         );
@@ -1913,7 +1916,7 @@ impl Editor {
     /// Anchor the first display line at a row of the current text.
     pub fn set_view_anchor(&mut self, row: usize) {
         let data = self.text.to_vec();
-        let columns = self.viewport.width.max(1);
+        let columns = self.viewport.wrap_width();
         let Some(byte) =
             crate::view::row_start_with_breakat(&data, row, columns, self.tab_width, &self.breakat)
         else {
@@ -1946,13 +1949,14 @@ impl Editor {
     /// row at a time and keep the cursor on the last or first visible row.
     fn request_centered_follow(&mut self) {
         let viewport = self.viewport;
-        let columns = viewport.width.max(1);
+        let columns = viewport.wrap_width();
         let height = viewport.height.max(1);
         let top = viewport.top;
         let data = self.text.to_vec();
-        let (row, _) = crate::view::screen_position_with_breakat(
+        let (row, _) = crate::view::screen_position_with_layout(
             &data,
             self.cursor,
+            viewport.width,
             columns,
             self.tab_width,
             &self.breakat,

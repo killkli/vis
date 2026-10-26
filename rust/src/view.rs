@@ -21,6 +21,19 @@ pub struct ViewportMetrics {
     pub height: usize,
     /// First displayed soft-wrapped row.
     pub top: usize,
+    /// Native per-window wrapcolumn option; zero means the full body width.
+    pub wrapcolumn: usize,
+}
+
+impl ViewportMetrics {
+    pub fn wrap_width(self) -> usize {
+        let width = self.width.max(1);
+        if self.wrapcolumn > 0 {
+            width.min(self.wrapcolumn).max(1)
+        } else {
+            width
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -365,7 +365,15 @@ impl Workspace {
             .position(|window| window.id == id)
             .ok_or_else(|| invalid("closed window"))?;
         let oneline = display.oneline;
+        let wrapcolumn = display.wrapcolumn;
         self.windows[index].display = display;
+        if let Some(mut viewport) = self.windows[index].view.viewport {
+            viewport.wrapcolumn = wrapcolumn;
+            self.windows[index].view.viewport = Some(viewport);
+            if index == self.active {
+                self.editor.set_viewport(Some(viewport));
+            }
+        }
         if oneline && index + 1 < self.windows.len() {
             let active = self.active_window_id();
             let window = self.windows.remove(index);
