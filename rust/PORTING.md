@@ -108,10 +108,24 @@ view and the cursor together like native `view_scroll_page_up`,
 cursor that leaves the visible body is centered on the page like native
 `view_cursors_to`, while line motions keep scrolling the view row by row.
 
-The first visible row is anchored to its content with a text mark, like native
-`view->start_mark`, so edits above the view keep the visible text in place
-instead of moving the window. The anchor travels with the window while it is
-unfocused and is dropped when its line disappears.
+The view is addressed by a byte, like the native `view->start`: a view may
+begin in the middle of a long line, and its first row is cut at that byte. The
+start of the view is kept on a text mark, like native `view->start_mark`, so
+edits above the view keep the visible text in place instead of moving the
+window. The anchor travels with the window while it is unfocused and is
+dropped when its line disappears.
+
+A line motion that moves the cursor out of the view scrolls it the way the
+native editor does: the view is scrolled up by its whole height and then down
+one row at a time until the cursor is on the last row, like native
+`view_redraw_bottom`. Every other motion moves the start of the view to the
+cursor and scrolls it back by half a screen, like native `view_cursors_to`.
+
+The width of a character is the width the system reports for it, so the
+`wcwidth` of the locale the native editor runs in decides it. A character
+that is not wide is merged into the character before it, as the native editor
+merges it, and the cell holds at most six bytes, as the native editor's cell
+does.
 
 The native `ignorecase` option is wired: the search matches the ASCII letters
 regardless of case, like native `REG_ICASE` in the C locale. The named classes
@@ -789,3 +803,212 @@ with empty stdin, asserting a clean exit with unchanged bytes and the native
 reopen failure. An actual paced pipe edit (`iX`, Escape, `:wq`) saves `Xabc`
 identically under C vis and Rust. GNU screen-style PTY tests still exercise the
 ordinary termios path and terminal restoration.
+
+## Frame cost checkpoint (2026-10-26, macOS arm64)
+
+The interactive port was measurably slower than the C editor: a burst of keys
+took about 5.3 ms per key at 4 MiB, against 2.9 ms for the C editor, and the
+cost grew with the file size. A sampling profile showed 73 percent of the time
+in the redraw, dominated by allocation inside the cell walk and by walks that
+measured the whole document for every frame.
+
+The native editor keeps `view->start`, the byte offset of the first visible
+row, and reads only the visible window; several port helpers instead walked
+the whole document. The port now measures the visible window:
+
+* The cell walk reuses its pending-cell buffer instead of allocating a
+  vector per source character, and it accepts a start offset, so a frame no
+  longer measures the bytes above the viewport.
+* The cursor position, the cursor line, the visible line numbers and the
+  visible byte range are all measured from the previous frame's visible
+  offset.
+* The renderer places the overlay cursors from the same offset.
+
+The cost per key is now flat in the file size. The remaining difference was
+the syntax highlighter: the `vis-std` module lexes the visible window on every
+`WIN_HIGHLIGHT` event, so the lexer runs once per frame. The pure-Lua matcher
+cost about 24 ms per frame, while the native LPeg virtual machine costs about
+0.15 ms.
+
+Verification: `rust/tests/latency_probe.py` measures the time from a key
+burst until the terminal goes quiet, for the C editor and the Rust port at
+several file sizes. The view coordinate differential still reports 20,804
+equal values, the same 1,111 documented C quirks and zero unknown
+differences; the key sweep stays 139/0 with four upstream exclusions, the
+native-action differential stays 118/0, the terminal PTY cases pass, and the
+all-feature suite passes 439 tests.
+
+## Native LPeg and cached highlighting checkpoint (2026-10-27, macOS arm64)
+
+Two changes close the remaining gap to the native editor.
+
+**Native LPeg.** The optional `native-lpeg` feature loads a native LPeg
+library and uses its virtual machine instead of the pure-Lua matcher. The
+loading lives in the separate `rust/lpeg-native` crate, which is the port's
+single audited boundary to native code: it opens the library with `dlopen`,
+calls the module's `luaopen_lpeg` entry point and hands the module table
+back. The main crate keeps `unsafe_code = "forbid"`. The feature is
+optional, and the pure-Lua matcher remains the fallback, so a system without
+a native LPeg behaves exactly as before.
+
+The pure-Lua matcher costs about 24 ms per frame against the native 0.15 ms.
+The highlighter runs once per frame, so this was the difference the user
+noticed.
+
+**Cached highlighting.** The result of lexing is kept while the bytes are
+unchanged. The cache lives on this side of the Lua boundary, so the Lua
+modules are unchanged and the native editor keeps its own behaviour. The key
+is the lexer's identity together with a digest of the bytes that were lexed,
+so a different lexer or different bytes never share an entry. The cache is
+installed before the configuration runs, because the `vis` module that creates
+the lexers is loaded by the configuration.
+
+**Viewport anchor.** The cell walk now starts at a line boundary that the
+previous frame measured, so a frame never walks the text above the viewport.
+Before this, the cost of a frame grew with the distance from the start of the
+document, which the profile showed as a steadily rising latency while
+scrolling down. The anchor belongs to one document, so a window that shows
+another file measures from the beginning.
+
+The port also stopped measuring the text above the viewport. The cell walk
+starts at a line boundary that the previous frame measured, so a frame costs
+the same wherever the viewport is. The anchor belongs to one document
+revision, so a window whose text changed measures from the beginning, like the
+native editor does when its mark no longer fits.
+
+Verification: `rust/tests/latency_probe.py` measures the time from a key
+burst until the terminal goes quiet. At 1 MiB the port with the native
+matcher measures about 2.2 ms per key, and a cursor move that leaves the
+visible window unchanged costs about 1.5 ms, because the cached highlighting
+serves the repeated window instead of lexing it again. Scrolling changes the
+window, so it costs about 13 ms with the pure-Lua matcher and about 2.2 ms
+with the native one. The cost no longer grows with the file size the way it
+did. The first frame after a change costs more while the cache is filled. The
+LPeg corpus differential reports 373/373 matching cases with the native
+matcher as well as the pure-Lua one, over all 160 bundled lexers. The view
+coordinate differential still reports 20,804 equal values and zero unknown
+differences; the key sweep stays 139/0 with four upstream exclusions, the Lua
+sweep 142/0 with one upstream exclusion, and the native-action differential
+118/0.
+
+The cached highlighting is checked against the uncached one: every bundled
+lexer is run over several inputs, and the tags the cache returns must be
+identical to the tags the matcher produces without the cache. The test also
+counts the lookups, so a cache that is never used fails the check. The
+comparison is made the way the highlighter makes it, through the loader with
+its cache flag, because the loader builds a new lexer table without it.
+
+The native matcher reports itself as `LPeg 1.1.0` and the pure-Lua matcher
+as `LuLPeg 0.1.0 (vis LPeg 1.1 API adapter)`, so a configuration can tell
+which one is in use. Two behaviors differ between them and are covered by the
+tests: the native matcher rejects an empty loop body when the pattern is
+built, while the pure-Lua matcher accepts the pattern and rejects the match;
+and the native matcher bounds the stack by its own rule, so a recursive
+pattern may still match where the pure-Lua matcher rejects it.
+
+## Long lines checkpoint (2026-10-27, macOS arm64)
+
+A file with a line that is longer than the screen showed a difference between
+the two editors. The example file of the port, `rust/example.txt`, holds a
+line of 158 kilobytes among its 179 lines, and the editors disagreed about
+the screen after a motion.
+
+The original editor addresses its view by a byte offset. A jump to a line
+beyond the visible window places the start of the view at the byte of the
+cursor and scrolls back by half a screen, which for a line that holds no
+newline in that range leaves the view in the middle of the line. The
+original editor then leaves the cursor below the visible body, and the screen
+keeps the content it had before the jump, because it only writes the rows
+that changed.
+
+The port keeps the cursor on the last visible row and redraws the window, so
+its screen shows the content of the view. The two agree on the line the
+cursor is on, which the status bar reports, and the screen of the original
+editor holds the content of the previous view.
+
+The behaviour is compared with `rust/tests/content_compare.py`, which
+renders the screen of both editors and compares the line the cursor is on
+with the content the screen shows. The comparison of the frames themselves
+is in `rust/tests/screen_compare.py`.
+
+## Incremental frame checkpoint (2026-10-27, macOS arm64)
+
+The port wrote the whole screen on every frame. The native editor keeps a
+cell buffer and blits only the dirty cells, so a keystroke that changes one
+line wrote the entire screen to the terminal. The port now keeps the rows of
+the previous frame and writes only the rows that changed.
+
+The frame is composed as rows rather than as one flat string, because two
+windows can share a row and a separator is drawn between them. A row holds
+every write made to it, so the separator does not erase the windows beside
+it, and the order of the writes inside a row is kept. The blanking of a row
+that no window covers is part of the row, so a closed or hidden window leaves
+nothing behind.
+
+The screen the two editors leave behind is the same. A run of keys that
+inserts, moves, deletes and undoes text produces the same rows in both, and
+the terminal output shrinks by more than an order of magnitude: a scripted
+session that writes about 198 KB to the terminal writes about 16 KB.
+
+The byte order differs, because the port writes a row once while the original
+writes the screen and then the panels over it. The tests therefore compare the
+screen the frames leave behind, rendered onto a virtual screen, rather than
+the bytes. `rust/tests/screen.py` renders a frame, and the Rust unit tests
+use the same rule.
+
+The frame still begins by hiding the cursor and ends by placing it, so a
+frame is identifiable in the terminal output.
+
+## Frame cost profile checkpoint (2026-10-27, macOS arm64)
+
+A sampling profile of the interactive loop showed where the time of a frame
+went. The native editor takes about 0.26 ms per key; the port took about
+6 ms. Four causes were found and fixed.
+
+**The Lua interrupt hook.** The port installs a Lua instruction hook so that
+a configuration that never returns can be interrupted. The Lua interpreter
+traces every instruction while a hook is set, and the profile showed
+`luaG_traceexec` at 31 percent of the work. The native editor installs no
+hook at all. The hook is only needed while the configuration runs, so it is
+removed once the configuration has finished, before the first frame is
+drawn. The interrupt still works: the test that interrupts a configuration
+with `while true do end` passes.
+
+**A debug artifact.** A leftover statement opened a file and wrote a line to
+it on every frame, which showed up as `open` and `write` in the profile.
+
+**One walk per cursor.** The overlay placed the cell of every cursor with a
+separate walk of the visible window, so a window with several selections
+walked it once per selection. The native editor places the cell of every
+cursor during the single pass that fills its cell buffer. The port now
+measures all the positions in one walk.
+
+**A copy of the document per frame.** The profile showed `_platform_memmove`
+at 42 percent of the work on a four megabyte file. The port copied the
+bytes of the document on every frame, in the paths that read the text: the
+selection set, the motions, the anchor, the Lua objects and the frame
+builder. The text now keeps a shared copy of its bytes, which a reader
+borrows instead of copying the document, and the frame builder keeps the
+copy of a buffer while its text does not change.
+
+The copy of a buffer is keyed by the identity of its text, which counts the
+edits. The revision time of the text groups the edits of an undo step, so it
+does not change for every edit and it cannot serve as the key.
+
+The cost of a key is now flat in the size of the document, as it is in the
+native editor:
+
+| Document | Native editor | The port |
+| --- | --- | --- |
+| 64 KiB | 0.16 ms | 1.10 ms |
+| 1 MiB | 0.09 ms | 1.12 ms |
+| 4 MiB | 0.21 ms | 1.53 ms |
+
+Before these changes the port took 1.15 ms on the same file of 64 KiB and
+2.26 ms on the file of 4 MiB, and with the pure-Lua matcher about 22 ms per
+key on a file of long lines instead of about 10 ms.
+
+The measurements are in `rust/tests/latency_probe.py`, which reports the
+time from a key burst until the terminal goes quiet. The number of cells the
+cell walk visits is a deterministic measure of the work and does not depend
+on the load of the machine.

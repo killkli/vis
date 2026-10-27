@@ -2,6 +2,7 @@
 //!
 //! Userdata keeps weak runtime references; the runtime owns the interpreter and
 //! the editor. Stable host IDs are checked on every operation.
+mod lexcache;
 mod lpeg;
 mod objects;
 #[cfg(unix)]
@@ -24,6 +25,22 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+
+/// Install the `lpeg` and `re` modules into a Lua state.
+///
+/// The host calls this during startup. It is public so a diagnostic tool can
+/// report which matcher a build uses.
+pub fn install_lpeg(lua: &mlua::Lua, preload: &mlua::Table) -> mlua::Result<()> {
+    lpeg::install_into(lua, preload)
+}
+
+/// The name of the LPeg matcher this host uses.
+///
+/// The native virtual machine reports `LPeg`; the pure-Lua matcher reports
+/// LuLPeg. The value is for diagnostics only.
+pub fn lpeg_backend(lua: &mlua::Lua) -> Option<String> {
+    lpeg::backend_name(lua)
+}
 
 pub(crate) type Context = Weak<Inner>;
 
@@ -90,6 +107,12 @@ pub(crate) struct Inner {
     process_group_observer: RefCell<Option<ProcessGroupObserver>>,
     callback_help: RefCell<HashMap<u64, String>>,
     interrupt: Arc<AtomicBool>,
+    /// The cached syntax highlighting results.
+    ///
+    /// The highlighter runs on every frame, so the result of lexing the same
+    /// bytes is kept while the input is unchanged. The cache is cleared when
+    /// the document changes, so a stale highlight is never shown.
+    pub(crate) lex_cache: RefCell<Option<Rc<lexcache::LexCache>>>,
     #[cfg(unix)]
     processes: RefCell<process::Manager>,
 }
@@ -225,12 +248,62 @@ impl Runtime {
         process_observer: Option<ProcessObserver>,
         process_group_observer: Option<ProcessGroupObserver>,
     ) -> Result<Self> {
+        Self::initialize_with_cache(
+            search_paths,
+            interrupt,
+            process_observer,
+            process_group_observer,
+            true,
+        )
+    }
+    /// A runtime whose lexers are not cached.
+    ///
+    /// The cache is what the editor installs, so this runtime reaches the
+    /// matcher directly. It serves as the reference the cached results are
+    /// compared against.
+    pub fn new_without_lex_cache(search_paths: &[PathBuf]) -> Result<Self> {
+        Self::initialize_without_lex_cache(
+            search_paths,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None,
+        )
+    }
+    fn initialize_without_lex_cache(
+        search_paths: &[PathBuf],
+        interrupt: Arc<AtomicBool>,
+        process_observer: Option<ProcessObserver>,
+        process_group_observer: Option<ProcessGroupObserver>,
+    ) -> Result<Self> {
+        Self::initialize_with_cache(
+            search_paths,
+            interrupt,
+            process_observer,
+            process_group_observer,
+            false,
+        )
+    }
+    fn initialize_with_cache(
+        search_paths: &[PathBuf],
+        interrupt: Arc<AtomicBool>,
+        process_observer: Option<ProcessObserver>,
+        process_group_observer: Option<ProcessGroupObserver>,
+        lex_cache: bool,
+    ) -> Result<Self> {
         // Native vis opens every library, but mlua only exposes `debug` and
         // `ffi` through its unsafe constructor, which this crate forbids.
         // Configuration needing `debug.getinfo` therefore fails; see
         // LUA_PORTING.md.
         let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
         install_debug_library(&lua)?;
+        // The hook that interrupts a long-running Lua call.
+        //
+        // The hook is installed while the configuration runs and removed once
+        // the editor reaches its interactive loop. The Lua interpreter traces
+        // every instruction while a hook is set, so an always installed hook
+        // costs about a third of the time of a frame. The native editor
+        // installs no hook at all, and the port only needs one to interrupt a
+        // configuration that never returns.
         let hook_interrupt = Arc::clone(&interrupt);
         lua.set_global_hook(
             HookTriggers::new().every_nth_instruction(10_000),
@@ -281,6 +354,7 @@ impl Runtime {
             process_group_observer: RefCell::new(process_group_observer),
             callback_help: RefCell::new(HashMap::new()),
             interrupt,
+            lex_cache: RefCell::new(None),
             #[cfg(unix)]
             processes: RefCell::new(process::Manager::default()),
         });
@@ -309,6 +383,16 @@ impl Runtime {
                 .set_process_group_observer(Arc::clone(observer));
         }
         inner.install(search_paths)?;
+        // The cache in front of the lexers is installed before the
+        // configuration runs, because the configuration loads the `vis`
+        // module, and the module creates the lexers.
+        if lex_cache {
+            let cache = Rc::new(lexcache::LexCache::new());
+            if let Err(error) = lexcache::install(&inner.lua, Rc::clone(&cache)) {
+                inner.report_lua_error(error);
+            }
+            *inner.lex_cache.borrow_mut() = Some(cache);
+        }
         if let Err(error) = inner
             .lua
             .load("require('visrc')")
@@ -340,6 +424,34 @@ impl Runtime {
     }
     pub fn lua(&self) -> &Lua {
         &self.inner.lua
+    }
+    /// The number of lookups the highlighting cache served.
+    ///
+    /// A hit means the same bytes were lexed before, so the result was reused.
+    pub fn lex_cache_hits(&self) -> u64 {
+        self.inner
+            .lex_cache
+            .borrow()
+            .as_ref()
+            .map_or(0, |cache| cache.hits())
+    }
+    /// The number of lookups the highlighting cache could not serve.
+    pub fn lex_cache_misses(&self) -> u64 {
+        self.inner
+            .lex_cache
+            .borrow()
+            .as_ref()
+            .map_or(0, |cache| cache.misses())
+    }
+    /// Remove the interrupt hook.
+    ///
+    /// The hook makes the Lua interpreter trace every instruction, which
+    /// costs about a third of the time of a frame. The configuration is the
+    /// only place where a Lua call can run long enough to need an interrupt,
+    /// so the hook is removed once the configuration has run.
+    pub fn remove_interrupt_hook(&self) {
+        self.inner.lua.remove_global_hook();
+        self.inner.lua.remove_hook();
     }
     pub fn workspace(&self) -> Rc<RefCell<Workspace>> {
         self.inner.workspace.clone()

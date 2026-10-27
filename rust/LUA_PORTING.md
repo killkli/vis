@@ -104,7 +104,10 @@ Synchronous pipes share that supervisor. Leaders remain reserved with
 `waitid(NOWAIT)` through group cleanup to prevent PID/PGID reuse before signals;
 TERM-resistant descendants, closed pipes and early leader exits have focused
 coverage. Global Lua instruction hooks allow interrupting busy configuration and
-coroutines, with CLI signal handlers installed before configuration.
+coroutines, with CLI signal handlers installed before configuration. The hook is
+removed once the configuration has run: the Lua interpreter traces every
+instruction while a hook is set, and the frames of the interactive loop are
+where the time is spent.
 
 ## LPeg without native extension loading
 

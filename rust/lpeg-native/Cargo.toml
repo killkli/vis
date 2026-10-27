@@ -1,0 +1,22 @@
+[package]
+name = "vis-lpeg-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "ISC"
+description = "Native LPeg loader for the vis Rust port"
+publish = false
+
+[dependencies]
+libloading = "0.8.9"
+mlua = { version = "0.11.6", default-features = false, features = ["lua55", "vendored"] }
+
+[lints.rust]
+# This crate is the port's single audited boundary to native code. The main
+# crate keeps `unsafe_code = "forbid"`; every unsafe operation below is a
+# dynamic-library load or a Lua C call, and the crate contains no other
+# unsafe code.
+unsafe_code = "allow"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

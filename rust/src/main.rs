@@ -601,6 +601,17 @@ impl InteractiveHost {
         Ok(vis::workspace::Outcome::Continue)
     }
 
+    /// Remove the Lua interrupt hook.
+    ///
+    /// The hook makes the Lua interpreter trace every instruction, which
+    /// costs about a third of the time of a frame. Only the configuration can
+    /// run a Lua call long enough to need an interrupt, so the hook is
+    /// removed once the configuration has run.
+    #[cfg(feature = "lua")]
+    fn remove_interrupt_hook(&self) {
+        self.runtime.remove_interrupt_hook();
+    }
+
     fn shutdown(&self) -> HostResult<()> {
         #[cfg(feature = "lua")]
         self.runtime.shutdown()?;
@@ -760,6 +771,9 @@ impl InteractiveHost {
                     wrapcolumn: 0,
                 },
             );
+            // The view is anchored to the byte it starts at, so the text
+            // changing above it keeps the visible content in place.
+            workspace.anchor_window_view(item.id, item.start, item.top);
         }
     }
 }
@@ -771,6 +785,9 @@ fn render_views(frames: &[vis::workspace::Frame]) -> Vec<vis::terminal::RenderVi
         .map(|frame| vis::terminal::RenderView {
             id: frame.id,
             data: frame.bytes.as_slice(),
+            scroll_start: frame.scroll_start,
+            line_motion: frame.line_motion,
+            anchor_start: frame.anchor_start,
             cursor: frame.selections[frame.primary].cursor,
             selections: &frame.selections,
             anchored: &frame.anchored,
@@ -936,6 +953,12 @@ fn run_interactive_session(
     if host.workspace.borrow().window_count() == 0 {
         return Ok(host.exit_code().unwrap_or(0));
     }
+    // The configuration has run, and it is the only place where a Lua call
+    // can run long enough to need an interrupt. The hook makes the Lua
+    // interpreter trace every instruction, so it is removed before the first
+    // frame is drawn.
+    #[cfg(feature = "lua")]
+    host.remove_interrupt_hook();
     terminal.initialize(stdin_consumed)?;
     loop {
         let (quit, updated) = host.draw(terminal, &message)?;

@@ -68,6 +68,7 @@ printf("%d %zu",t,p);for(size_t f=0;f<sizeof(fs)/sizeof(*fs);f++)printf(" %zu",f
 '''
 
 RUST_MAIN = r'''
+#[path=WIDTH_PATH] mod width;
 #[path=MOTION_PATH] mod motion;
 use motion::*;
 fn main(){let mut seed=1u32;let alphabet=b"a b!_\t\n\r\x0c\x0b";for t in 0..100{let mut data=[0u8;8];for b in &mut data{seed=seed.wrapping_mul(1664525).wrapping_add(1013904223);*b=alphabet[((seed>>16)%10)as usize];}for p in 0..=8{print!("{t} {p}");for f in [word_start_next,word_start_prev,word_end_next,word_end_prev,longword_start_next,longword_start_prev,longword_end_next,longword_end_prev,line_begin,line_start,line_finish,line_end,line_next,line_prev,line_up,line_down,paragraph_next,paragraph_prev,sentence_next,sentence_prev]{print!(" {}",f(&data,p));}for (outer,big) in [(false,false),(true,false),(false,true),(true,true)]{let r=word_object(&data,p,outer,big);print!(" {} {}",r.start,r.end);}println!();}}}
@@ -106,7 +107,10 @@ def main():
         c_binary = folder / "oracle"
         rs_binary = folder / "actual"
         c_source.write_text(C_PRELUDE + motions + objects + C_MAIN)
-        rs_source.write_text(RUST_MAIN.replace("MOTION_PATH", json.dumps(str(ROOT / "rust/src/motion.rs"))))
+        rs_source.write_text(
+            RUST_MAIN.replace("MOTION_PATH", json.dumps(str(ROOT / "rust/src/motion.rs")))
+            .replace("WIDTH_PATH", json.dumps(str(ROOT / "rust/src/width.rs")))
+        )
         run(shlex.split(os.environ.get("CC", "cc")) + ["-std=c11", str(c_source), "-o", str(c_binary)])
         run(["rustc", "--edition=2024", "-Awarnings", str(rs_source), "-o", str(rs_binary)])
         expected = run([str(c_binary)]).splitlines()

@@ -576,6 +576,14 @@ pub struct Editor {
     /// First display row the next frame should show, set by scroll actions.
     /// Consumed after one render so later cursor motions auto-follow again.
     scroll_request: Option<usize>,
+    /// The byte the view starts at, when the scroll named one.
+    scroll_start: Option<usize>,
+    /// The cursor left the view by a line motion.
+    ///
+    /// The original editor scrolls a line motion so the cursor lands on the
+    /// last row of the view, and every other motion scrolls back by half a
+    /// screen.
+    line_motion: bool,
     /// Native `escdelay` option.
     escape_delay: Option<std::time::Duration>,
     /// Native `ignorecase` option: the search ignores the case of the ASCII
@@ -590,6 +598,16 @@ pub struct Editor {
     /// Native `view->start_mark`: the first displayed row is tracked by a text
     /// mark, so edits above the view keep the visible content in place.
     view_anchor: Option<crate::text::Mark>,
+    /// The display row the anchor was measured for.
+    ///
+    /// The anchor is measured again only when the row changes, so a redraw
+    /// that keeps the row does not walk the text above the viewport.
+    view_anchor_row: Option<usize>,
+    /// The byte the anchor was set on.
+    ///
+    /// The mark follows the text, so the rows the anchor moved are counted
+    /// from this byte instead of measuring the whole document.
+    view_anchor_byte: usize,
     buffer_state: BufferState,
     selected_mark: char,
     session: sam::Session,
@@ -687,7 +705,11 @@ impl Editor {
                 wrapcolumn: 0,
             },
             scroll_request: None,
+            scroll_start: None,
+            line_motion: false,
             view_anchor: None,
+            view_anchor_row: None,
+            view_anchor_byte: 0,
             escape_delay: None,
             ignorecase: false,
             loadmethod: None,
@@ -764,8 +786,11 @@ impl Editor {
             .iter()
             .map(|(id, _, flag)| (*id, *flag))
             .collect();
+        // The text is read without copying it, so a frame does not copy the
+        // document.
+        let data = self.text.shared_bytes();
         let set = SelectionSet::from_identified(
-            &self.text.to_vec(),
+            data.as_slice(),
             selections.into_iter().map(|(id, s, _)| (id, s)).collect(),
             primary,
         )
@@ -1894,36 +1919,106 @@ impl Editor {
     /// one-shot: the workspace clears it after rendering.
     pub fn request_scroll(&mut self, top: usize) {
         self.scroll_request = Some(top);
+        self.scroll_start = None;
+    }
+
+    /// Ask the next frame to start the view at a byte, keeping the row of
+    /// that byte as the first visible row.
+    ///
+    /// The original editor addresses its view by a byte offset, so a view can
+    /// begin in the middle of a long line. The port requests the row of that
+    /// byte and keeps the byte, so the row is cut at the same place.
+    pub fn request_scroll_at(&mut self, top: usize, start: usize) {
+        self.scroll_request = Some(top);
+        self.scroll_start = Some(start);
     }
 
     /// Row the anchored first display line occupies in the current text.
     pub fn view_anchor_row(&self) -> Option<usize> {
         let mark = self.view_anchor.as_ref()?;
         let byte = self.text.mark_get(mark.clone())?;
+        let row = self.view_anchor_row?;
+        // The mark follows the text it was set on, so the anchor only moves
+        // when the text before it changed. The rows it moved by are counted
+        // from the byte the anchor was set on, which is much cheaper than
+        // measuring the whole document on every frame.
+        let delta = self.rows_between(self.view_anchor_byte, byte);
+        Some((row as isize + delta).max(0) as usize)
+    }
+
+    /// The number of display rows between two byte positions.
+    ///
+    /// The rows are counted from the text, so a line that was added above the
+    /// anchor moves it down by one row. The count is signed, so a deletion
+    /// above the anchor moves it up.
+    fn rows_between(&self, from: usize, to: usize) -> isize {
+        if to == from {
+            return 0;
+        }
         let data = self.text.to_vec();
-        let viewport = self.viewport;
-        let (row, _) = crate::view::screen_position_with_layout(
+        let columns = self.viewport.wrap_width();
+        let (start, end) = if from <= to { (from, to) } else { (to, from) };
+        // The rows are counted with the same layout the view uses, so a line
+        // that wraps takes the rows it occupies. The walk visits the cells of
+        // a row one after another, so a row is counted once, when its first
+        // cell is visited.
+        let mut rows = 0usize;
+        let mut last_row = usize::MAX;
+        crate::view::walk_cells_from_layout(
             &data,
-            byte,
-            viewport.width,
-            viewport.wrap_width(),
+            start,
+            0,
+            1,
+            self.viewport.width,
+            columns,
             self.tab_width,
             &self.breakat,
+            |cell| {
+                if cell.pos >= end {
+                    return false;
+                }
+                if cell.row != last_row {
+                    last_row = cell.row;
+                    rows += 1;
+                }
+                true
+            },
         );
-        Some(row)
+        if to < from {
+            -(rows as isize)
+        } else {
+            rows as isize
+        }
     }
 
     /// Anchor the first display line at a row of the current text.
-    pub fn set_view_anchor(&mut self, row: usize) {
-        let data = self.text.to_vec();
-        let columns = self.viewport.wrap_width();
-        let Some(byte) =
-            crate::view::row_start_with_breakat(&data, row, columns, self.tab_width, &self.breakat)
-        else {
+    ///
+    /// The anchor is measured from the previous one when the row did not
+    /// change, so a redraw that keeps the same row does not measure the text
+    /// above the viewport again.
+    pub fn set_view_anchor(&mut self, row: usize, start: Option<usize>) {
+        let Some(byte) = start else {
             self.view_anchor = None;
+            self.view_anchor_row = None;
+            self.view_anchor_byte = 0;
             return;
         };
+        if self.view_anchor_row == Some(row) && self.view_anchor.is_some() {
+            // The row is unchanged and the anchor still fits.
+            return;
+        }
         self.view_anchor = self.text.mark(byte);
+        self.view_anchor_row = Some(row);
+        self.view_anchor_byte = byte;
+    }
+
+    /// The byte the anchored view line starts at.
+    ///
+    /// The mark follows the text it was set on, so the byte moves with the
+    /// text when the text changes above it.
+    pub fn view_anchor_start(&self) -> Option<usize> {
+        let mark = self.view_anchor.as_ref()?;
+        self.text.mark_get(mark.clone())
     }
 
     /// Move the anchor out of the editor, for a window that loses the focus.
@@ -1940,8 +2035,25 @@ impl Editor {
         self.scroll_request
     }
 
+    /// The byte the view starts at, when the scroll named one.
+    pub fn scroll_start(&self) -> Option<usize> {
+        self.scroll_start
+    }
+
+    /// Record that the cursor left the view by a line motion.
+    pub fn set_line_motion(&mut self, line_motion: bool) {
+        self.line_motion = line_motion;
+    }
+
+    /// Whether the cursor left the view by a line motion.
+    pub fn line_motion(&self) -> bool {
+        self.line_motion
+    }
+
     pub fn clear_scroll_request(&mut self) {
         self.scroll_request = None;
+        self.scroll_start = None;
+        self.line_motion = false;
     }
 
     /// Native `view_cursors_to`: a cursor that leaves the visible body is
@@ -1962,7 +2074,54 @@ impl Editor {
             &self.breakat,
         );
         if row < top || row >= top.saturating_add(height) {
-            self.request_scroll(row.saturating_sub(height / 2));
+            // Native `view_cursors_to`: the start of the view is placed at the
+            // byte of the cursor and the view is scrolled back by half a
+            // screen, so the view can begin in the middle of a long line. The
+            // cursor is still outside the view when the line that holds it is
+            // longer than the screen, so the start of that line is used.
+            let start = crate::view::view_start_for_cursor(
+                &data,
+                self.cursor,
+                height,
+                viewport.width,
+                self.tab_width,
+            );
+            let (start_row, _) = crate::view::screen_position_with_layout(
+                &data,
+                start,
+                viewport.width,
+                columns,
+                self.tab_width,
+                &self.breakat,
+            );
+            // The cursor is still outside the view when the line that holds
+            // it is longer than the screen, so the start of that line is used,
+            // as the original editor does.
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/follow.log")
+            {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    file,
+                    "FOLLOW start={start} start_row={start_row} row={row} height={height} top={top}"
+                );
+            }
+            if start_row + height <= row {
+                let start = crate::motion::line_begin(&data, self.cursor);
+                let (row, _) = crate::view::screen_position_with_layout(
+                    &data,
+                    start,
+                    viewport.width,
+                    columns,
+                    self.tab_width,
+                    &self.breakat,
+                );
+                self.request_scroll_at(row, start);
+            } else {
+                self.request_scroll_at(start_row, start);
+            }
         }
     }
 
@@ -2651,7 +2810,7 @@ impl Editor {
     }
 
     fn sync_primary_to_set(&mut self) -> Result<(), EditorError> {
-        let data = self.text.to_vec();
+        let data = self.text.shared_bytes();
         let id = self.selection_set.primary_id();
         let current = self.selection_set.primary();
         let selection = if self.cursor == current.cursor && self.anchor == current.anchor {
@@ -4225,7 +4384,7 @@ impl Editor {
     }
 
     fn motion_one(&mut self, key: Key) -> Result<Option<(usize, bool, bool, bool)>, EditorError> {
-        let data = self.text.to_vec();
+        let data = self.text.shared_bytes();
         let mut pos = self.cursor;
         let count = self.count.unwrap_or(1);
         let count = if self.operator.is_some() {
@@ -4267,6 +4426,10 @@ impl Editor {
             )));
         }
         if matches!(key, Key::Char('j' | 'k') | Key::Up | Key::Down | Key::Enter) {
+            // Native `view_line_down` and `view_line_up`: a cursor that leaves
+            // the view scrolls it so the cursor lands on its last or first
+            // row.
+            self.set_line_motion(true);
             let column = self
                 .preferred_column
                 .unwrap_or_else(|| self.display_column(&data, pos));
@@ -4323,10 +4486,16 @@ impl Editor {
                 Key::Char('l') | Key::Right => motion::char_next,
                 Key::Char('j') | Key::Down | Key::Enter => {
                     linewise = true;
+                    // Native `view_line_down`: a cursor that leaves the view
+                    // scrolls it so the cursor lands on the last row.
+                    self.set_line_motion(true);
                     motion::line_down
                 }
                 Key::Char('k') | Key::Up => {
                     linewise = true;
+                    // Native `view_line_up`: a cursor that leaves the view
+                    // scrolls it so the cursor lands on the first row.
+                    self.set_line_motion(true);
                     motion::line_up
                 }
                 Key::Char('w') => motion::word_start_next,
@@ -4487,7 +4656,7 @@ impl Editor {
         if !self.motion_targets.is_empty() {
             self.external_marks.clear();
             let targets = std::mem::take(&mut self.motion_targets);
-            let data = self.text.to_vec();
+            let data = self.text.shared_bytes();
             if self.operator.is_some() {
                 let ranges: Vec<Range<usize>> = self
                     .selection_set

@@ -2118,7 +2118,12 @@ impl Editor {
                 if jump {
                     self.jumplist_save();
                 }
-                if !matches!(motion, NativeMotion::LineUp | NativeMotion::LineDown) {
+                let line_motion = matches!(motion, NativeMotion::LineUp | NativeMotion::LineDown);
+                if line_motion {
+                    // The original editor scrolls a line motion so the cursor
+                    // lands on the last row of the view.
+                    self.set_line_motion(true);
+                } else {
                     self.request_centered_follow();
                 }
                 return Ok(action);
@@ -2762,7 +2767,7 @@ impl Editor {
         let explicit = self.count.is_some() || self.operator_count > 1;
         let count = self.combined_count()?;
         let raw = explicit.then_some(count);
-        let data = self.text.to_vec();
+        let data = self.text.shared_bytes();
         let origin = self.cursor;
         let mut targets = Vec::new();
         let properties = movement.properties();
@@ -2863,7 +2868,7 @@ impl Editor {
     fn native_window(&mut self, window: NativeWindow) -> Result<EditorAction, EditorError> {
         use NativeWindow as W;
         let viewport = self.viewport;
-        let data = self.text.to_vec();
+        let data = self.text.shared_bytes();
         let (row, _) = screen_position_with_layout(
             &data,
             self.cursor,
@@ -3180,6 +3185,14 @@ impl Editor {
             });
         }
         self.preferred_column = preferred;
+        if matches!(
+            movement,
+            NativeMotion::ScreenLineDown | NativeMotion::ScreenLineUp
+        ) {
+            // Native `view_screenline_down`: a cursor that reaches the last
+            // row of the view scrolls it down by one row.
+            self.set_line_motion(true);
+        }
         if self.operator.is_some() && properties.linewise {
             // Native window motions are LINEWISE without LINEWISE_INCLUSIVE:
             // the destination line joins the range only when the destination is

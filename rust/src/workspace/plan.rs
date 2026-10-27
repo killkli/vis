@@ -466,6 +466,7 @@ impl Workspace {
             layout: Layout::Horizontal,
             closing: BTreeSet::new(),
             opening: BTreeSet::new(),
+            bytes: RefCell::new(BTreeMap::new()),
             message_buffer: Some(1),
             message_window: None,
             prompt_buffer: Some(0),
@@ -2035,6 +2036,21 @@ impl Workspace {
 impl Workspace {
     /// Record the UI-measured body geometry used by viewport motions. Unknown
     /// windows are ignored because a draw may finish after its window closed.
+    /// Anchor the view of a window to the byte it starts at.
+    ///
+    /// Native `view->start_mark` keeps the visible content in place when the
+    /// text changes above the view, so the mark is set on the byte the view
+    /// starts at.
+    pub fn anchor_window_view(&mut self, id: usize, start: Option<usize>, row: usize) {
+        let Some(index) = self.windows.iter().position(|window| window.id == id) else {
+            return;
+        };
+        if index != self.active {
+            return;
+        }
+        self.editor.set_view_anchor(row, start);
+    }
+
     pub fn set_window_viewport(&mut self, id: usize, mut viewport: crate::view::ViewportMetrics) {
         let Some(index) = self.windows.iter().position(|window| window.id == id) else {
             return;
@@ -2043,9 +2059,6 @@ impl Workspace {
         self.windows[index].view.viewport = Some(viewport);
         if index == self.active {
             self.editor.set_viewport(Some(viewport));
-            // Native `view->start_mark` keeps the visible content in place
-            // when the text changes above the view.
-            self.editor.set_view_anchor(viewport.top);
         }
     }
     pub fn window_selection_range(

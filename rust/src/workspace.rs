@@ -10,6 +10,7 @@ use crate::file::{Document, SaveMethod};
 use crate::jumplist::JumpList;
 use crate::selection::{Selection, SelectionId, SelectionMarks, SelectionSet};
 use crate::text::Text;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod plan;
@@ -255,8 +256,25 @@ pub struct Frame {
     pub topline: Option<usize>,
     /// First display row of the anchored view line, when the text moved it.
     pub anchor: Option<usize>,
+    /// The byte the anchored view line starts at, when the text moved it.
+    ///
+    /// The original editor keeps the start of its view on a text mark, so the
+    /// view follows the text when the text changes above it.
+    pub anchor_start: Option<usize>,
     /// Native `wrapcolumn` option: wrap the text at this column.
     pub wrapcolumn: usize,
+    /// The byte the view starts at, when a scroll named one.
+    ///
+    /// The original editor addresses its view by a byte offset, so a view can
+    /// begin in the middle of a long line.
+    pub scroll_start: Option<usize>,
+    /// The cursor left the view by a line motion.
+    pub line_motion: bool,
+    /// The revision of the document the frame shows.
+    ///
+    /// The renderer uses it to recognise that a window still shows the same
+    /// document, so the measured layout of the previous frame can be reused.
+    pub revision: i64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -285,7 +303,19 @@ pub struct Workspace {
     next_prompt: u64,
     executing_prompts: BTreeMap<u64, usize>,
     next_structural: u64,
+    /// The bytes of the buffers, kept while their text does not change.
+    ///
+    /// A frame needs the bytes of every buffer it shows. Copying the text of
+    /// a buffer costs the size of the document, so the copy is kept until the
+    /// text changes.
+    bytes: RefCell<BTreeMap<usize, CachedBytes>>,
 }
+
+/// The bytes of a buffer and the identity of the text they belong to.
+///
+/// The identity changes with every edit of the text, so the bytes are copied
+/// only when the text changed.
+type CachedBytes = (u64, Arc<Vec<u8>>);
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -505,6 +535,7 @@ impl Workspace {
 
     pub fn frames(&self) -> Vec<Frame> {
         let mut bytes = BTreeMap::new();
+        let mut cached = self.bytes.borrow_mut();
         let prompt_parent = self
             .windows
             .get(self.active)
@@ -515,11 +546,20 @@ impl Workspace {
             .enumerate()
             .map(|(index, window)| {
                 let text = self.text(window.buffer);
-                let data = Arc::clone(
-                    bytes
-                        .entry(window.buffer)
-                        .or_insert_with(|| Arc::new(text.to_vec())),
-                );
+                // The bytes of the buffer are copied only when its text
+                // changed since the last frame.
+                let revision = text.content_id();
+                let data = match cached.get(&window.buffer) {
+                    Some((cached_revision, data)) if *cached_revision == revision => {
+                        Arc::clone(data)
+                    }
+                    _ => {
+                        let data = Arc::new(text.to_vec());
+                        cached.insert(window.buffer, (revision, Arc::clone(&data)));
+                        data
+                    }
+                };
+                bytes.insert(window.buffer, Arc::clone(&data));
                 let active = index == self.active;
                 let selections = if active {
                     self.editor.selections().to_vec()
@@ -572,12 +612,28 @@ impl Workspace {
                     } else {
                         None
                     },
+                    line_motion: if active {
+                        self.editor.line_motion()
+                    } else {
+                        false
+                    },
+                    scroll_start: if active {
+                        self.editor.scroll_start()
+                    } else {
+                        None
+                    },
                     anchor: if active {
                         self.editor.view_anchor_row()
                     } else {
                         None
                     },
+                    anchor_start: if active {
+                        self.editor.view_anchor_start()
+                    } else {
+                        None
+                    },
                     wrapcolumn: window.display.wrapcolumn,
+                    revision: text.state(),
                 }
             })
             .collect()

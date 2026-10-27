@@ -18,6 +18,9 @@ pub struct SelectionId(u64);
 impl SelectionId {
     pub fn fresh() -> Result<Self, SelectionError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
+        // The method is deprecated in favour of `try_update`, which needs a
+        // newer Rust than the crate supports.
+        #[allow(deprecated)]
         NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })

@@ -21,6 +21,7 @@ import tempfile
 import termios
 import time
 
+import screen
 from terminal_smoke import ROOT, Session
 from terminal_views import cursor, escape, raw, resize, settle
 
@@ -140,8 +141,13 @@ def wait_for(session, needle):
 
 
 def latest_frame(session):
-    frame = bytes(session.output).rsplit(b"\x1b[?25l", 1)[-1]
-    return re.sub(rb"\x1b\[[0-9;]*m", b"", frame)
+    """The screen the editor left behind.
+
+    The editor writes only the rows that changed, like the native editor,
+    which keeps a cell buffer and blits the dirty cells. The screen is
+    therefore the accumulated output, rendered onto a virtual screen.
+    """
+    return screen.render(bytes(session.output).decode("utf-8", "replace"), 24, 80)
 
 
 def run(binary, core_binary=None):
@@ -306,7 +312,8 @@ assert(vis:map(vis.modes.INSERT,'<F2>',geometry))
             settle(session)
             assert cursor(session)[0] >= 13, cursor(session)
             frame = latest_frame(session)
-            assert b":pwd" in frame and b":draft" in frame, frame
+            assert any(":pwd" in line for line in frame), frame
+            assert any(":draft" in line for line in frame), frame
             raw(session, b"\x1bOQ")
             settle(session)
             escape(session)
@@ -317,7 +324,10 @@ assert(vis:map(vis.modes.INSERT,'<F2>',geometry))
             settle(session)
             assert cursor(session) == (24, 14), cursor(session)
             frame = latest_frame(session)
-            assert b"\x1b[23;40H|" in frame and b"\x1b[24;40H|" not in frame, frame
+            # The separator stands between the two windows, above the prompt
+            # row that the split prompt occupies.
+            assert frame[22][39] == "|", frame[22]
+            assert len(frame[23]) <= 39 or frame[23][39] != "|", frame[23]
             raw(session, b"\x1bOQ")
             settle(session)
             assert geometry_audit.read_text().splitlines() == ["80,1,1,true", "80,12,12,true", "80,1,1,true"], geometry_audit.read_text()

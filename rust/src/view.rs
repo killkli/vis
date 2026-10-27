@@ -66,6 +66,12 @@ pub struct WrappedCell {
     /// Source bytes consumed by this cell.
     pub len: usize,
     pub kind: CellKind,
+    /// The byte after the characters that are not wide and join this cell.
+    ///
+    /// The original editor merges a character that is not wide into the
+    /// character before it, so the cell holds both. Zero means the cell
+    /// holds no other character.
+    pub merged_end: usize,
 }
 
 fn token_metrics(data: &[u8], pos: usize, column: usize) -> (usize, usize) {
@@ -96,6 +102,7 @@ fn token_metrics(data: &[u8], pos: usize, column: usize) -> (usize, usize) {
 }
 
 /// One cell of a logical line, before the wrapping is decided.
+#[derive(Clone)]
 struct LineCell {
     pos: usize,
     len: usize,
@@ -105,6 +112,12 @@ struct LineCell {
     column: usize,
     /// The cell is a break character, so a word may wrap after it.
     brk: bool,
+    /// The byte after the characters that are not wide and join this cell.
+    ///
+    /// The original editor merges a character that is not wide into the
+    /// character before it, so the cell holds both. Zero means the cell
+    /// holds no other character.
+    merged_end: usize,
 }
 
 enum Token {
@@ -115,7 +128,7 @@ enum Token {
 }
 
 /// The length of the UTF-8 sequence starting with the given byte.
-fn utf8_length(byte: u8) -> usize {
+pub fn utf8_length(byte: u8) -> usize {
     match byte {
         0xc2..=0xdf => 2,
         0xe0..=0xef => 3,
@@ -156,14 +169,45 @@ pub fn walk_cells_with_layout(
     wrap_columns: usize,
     tab_width: usize,
     breakat: &str,
+    visit: impl FnMut(WrappedCell) -> bool,
+) {
+    walk_cells_from_layout(
+        data,
+        0,
+        0,
+        1,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        visit,
+    );
+}
+
+/// Stream the cells of the text from a byte.
+///
+/// The original editor reads the text from the start of its view, so a view
+/// that begins in the middle of a long line shows the line from there. The
+/// rows the walk reports are the rows of the view, counted from the row the
+/// start byte is on.
+#[allow(clippy::too_many_arguments)]
+pub fn walk_cells_from_layout(
+    data: &[u8],
+    start: usize,
+    start_row: usize,
+    start_line: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
     mut visit: impl FnMut(WrappedCell) -> bool,
 ) {
     let tab_width = tab_width.clamp(1, 8);
     let columns = wrap_columns.max(1);
     let eof_columns = physical_columns.max(1);
-    let mut row = 0;
-    let mut line = 1;
-    let mut pos = 0;
+    let mut row = start_row;
+    let mut line = start_line;
+    let mut pos = start.min(data.len());
     let mut tokens: Vec<Token> = Vec::new();
     while pos < data.len() {
         let byte = data[pos];
@@ -205,6 +249,7 @@ pub fn walk_cells_with_layout(
             pos: data.len(),
             len: 0,
             kind: CellKind::Eof,
+            merged_end: 0,
         });
     } else {
         // C adds the EOF cell through view_addch, so it can trigger a final
@@ -248,12 +293,36 @@ fn place_line(
     // Whether the previously placed cell was a break character.
     let mut previous_break = false;
     let mut pending: Vec<LineCell> = Vec::new();
+    // The cell of the character before the one that is placed. The original
+    // editor merges a character that is not wide into the character before it,
+    // and the cell is placed only when the next character arrives.
+    let mut previous_cell: Option<LineCell> = None;
+    // Whether the cell that is held back is on this row.
+    let mut previous_on_row = false;
     let mut index = 0;
     while index < tokens.len() {
         if pending.is_empty() {
             pending = match &tokens[index] {
                 Token::Text { pos } => {
                     let (width, len) = token_metrics(data, *pos, out_column);
+                    if width == 0 {
+                        // The character joins the character before it, even
+                        // when that character is on the row before.
+                        if let Some(previous) = previous_cell.as_mut() {
+                            previous.merged_end = *pos + len;
+                            previous.len += len;
+                            if previous_on_row {
+                                // The cell is on this row, so the row holds
+                                // the merged character.
+                                if let Some(last) = row_cells.last_mut() {
+                                    last.merged_end = previous.merged_end;
+                                    last.len = previous.len;
+                                }
+                            }
+                            index += 1;
+                            continue;
+                        }
+                    }
                     let kind = if width > columns {
                         CellKind::Replacement
                     } else if data[*pos] == b' ' {
@@ -278,6 +347,7 @@ fn place_line(
                         width,
                         column: 0,
                         brk: !breakat.is_empty() && breakat.contains(text),
+                        merged_end: 0,
                     }]
                 }
                 Token::Tab { pos } => {
@@ -294,6 +364,7 @@ fn place_line(
                             width: 1,
                             column: 0,
                             brk: false,
+                            merged_end: 0,
                         })
                         .collect()
                 }
@@ -304,6 +375,7 @@ fn place_line(
                     width: 1,
                     column: 0,
                     brk: false,
+                    merged_end: 0,
                 }],
                 Token::Eof { pos } => vec![LineCell {
                     pos: *pos,
@@ -312,6 +384,7 @@ fn place_line(
                     width: 1,
                     column: 0,
                     brk: false,
+                    merged_end: 0,
                 }],
             };
         }
@@ -340,6 +413,8 @@ fn place_line(
             match split {
                 Some(split) => {
                     let moved: Vec<LineCell> = row_cells.drain(split..).collect();
+                    previous_cell = row_cells.last().cloned();
+                    previous_on_row = false;
                     if !emit_row(&row_cells, base_row + out_row, line, visit) {
                         return (out_row, out_column, true);
                     }
@@ -356,6 +431,8 @@ fn place_line(
                     continue;
                 }
                 None => {
+                    previous_cell = row_cells.last().cloned();
+                    previous_on_row = false;
                     if !emit_row(&row_cells, base_row + out_row, line, visit) {
                         return (out_row, out_column, true);
                     }
@@ -371,6 +448,8 @@ fn place_line(
         }
         cell.column = out_column;
         out_column += cell.width;
+        previous_cell = Some(cell.clone());
+        previous_on_row = true;
         row_cells.push(cell);
         if pending.is_empty() {
             index += 1;
@@ -398,6 +477,7 @@ fn emit_row(
             pos: cell.pos,
             len: cell.len,
             kind: cell.kind,
+            merged_end: cell.merged_end,
         }) {
             return false;
         }
@@ -406,6 +486,221 @@ fn emit_row(
 }
 
 /// The source line displayed in a row.
+/// The line number of a byte, counted from the start of the text.
+///
+/// The original editor reports the line of a position, not the line of a
+/// display row, so a view that begins in the middle of a long line still
+/// reports the line of the cursor.
+pub fn line_number_at_byte(data: &[u8], position: usize) -> usize {
+    let position = position.min(data.len());
+    1 + data[..position]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+}
+
+/// The byte the view starts at when a cursor leaves the view.
+///
+/// The original editor moves the start of the view to the cursor and scrolls
+/// it back by half a screen, so the view can begin in the middle of a long
+/// line.
+pub fn view_start_for_cursor(
+    data: &[u8],
+    position: usize,
+    rows: usize,
+    columns: usize,
+    _tab_width: usize,
+) -> usize {
+    let position = position.min(data.len());
+    if position == 0 {
+        return 0;
+    }
+    // The original scrolls back by half a screen. It steps back over the
+    // bytes, and it stops at the newline that ends the count, so the newline
+    // itself is not part of the offset. A newline immediately before the
+    // position is skipped first.
+    let wanted = (rows / 2) as i64;
+    let mut remaining = wanted;
+    let mut offset = 0usize;
+    let mut index = position - 1;
+    if data[index] == b'\n' && index > 0 {
+        offset += 1;
+        index -= 1;
+    }
+    // The scan is bounded by the size of a screenful of text, as the original
+    // bounds it, so a file without newlines does not scan the whole file.
+    let limit = rows * columns;
+    loop {
+        if data[index] == b'\n' {
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+        offset += 1;
+        if offset > limit || index == 0 {
+            break;
+        }
+        index -= 1;
+    }
+    position - offset
+}
+
+/// The byte the view starts at when a line motion moved the cursor out of
+/// the view.
+///
+/// The original editor scrolls the view up by its whole height and then down
+/// one row at a time until the cursor is on the last row of the view.
+pub fn view_start_for_line_motion(
+    data: &[u8],
+    position: usize,
+    rows: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> usize {
+    // The view is scrolled up by half a screen, like native `view_cursors_to`,
+    // and then by its whole height, like native `view_redraw_bottom`. The
+    // second scroll starts from the byte the first one reached.
+    let half = view_start_for_cursor(data, position, rows, physical_columns, tab_width);
+    let start = viewport_up(data, half, rows, physical_columns * rows);
+    // The view is then scrolled down one row at a time until the cursor is
+    // on its last row. The original editor advances the start of the view by
+    // the bytes of its first row, and it stops when the cursor is before the
+    // end of the view.
+    let mut start = start;
+    while let Some(end) = view_end(
+        data,
+        start,
+        rows,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+    ) {
+        if position < end {
+            break;
+        }
+        let Some((_, len)) = row_bytes(
+            data,
+            start,
+            physical_columns,
+            wrap_columns,
+            tab_width,
+            breakat,
+        ) else {
+            break;
+        };
+        let next = start + len;
+        if next <= start {
+            break;
+        }
+        start = next;
+    }
+    start
+}
+
+/// The byte the view starts at after it is scrolled up.
+///
+/// The original editor steps back over the bytes and stops at the newline
+/// that ends the count, so the newline itself is not part of the offset. A
+/// newline immediately before the position is skipped first, and the scan is
+/// bounded by a screenful of text.
+fn viewport_up(data: &[u8], position: usize, count: usize, limit: usize) -> usize {
+    let position = position.min(data.len());
+    if position == 0 {
+        return 0;
+    }
+    let mut remaining = count;
+    let mut offset = 0usize;
+    let mut index = position - 1;
+    if data[index] == b'\n' && index > 0 {
+        offset += 1;
+        index -= 1;
+    }
+    loop {
+        if data[index] == b'\n' {
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+        offset += 1;
+        if offset > limit || index == 0 {
+            break;
+        }
+        index -= 1;
+    }
+    position - offset
+}
+
+/// The byte after the last row the view shows.
+fn view_end(
+    data: &[u8],
+    start: usize,
+    rows: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<usize> {
+    let mut end = None;
+    walk_cells_from_layout(
+        data,
+        start,
+        0,
+        1,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        |cell| {
+            if cell.row >= rows {
+                return false;
+            }
+            end = Some(cell.pos + cell.len);
+            true
+        },
+    );
+    end
+}
+
+/// The bytes of the row that starts at a byte.
+fn row_bytes(
+    data: &[u8],
+    start: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<(usize, usize)> {
+    let mut end = None;
+    let mut first = None;
+    walk_cells_from_layout(
+        data,
+        start,
+        0,
+        1,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        |cell| {
+            if cell.row > 0 {
+                return false;
+            }
+            first.get_or_insert(cell.pos);
+            end = Some(cell.pos + cell.len);
+            true
+        },
+    );
+    match (first, end) {
+        (Some(first), Some(end)) => Some((end, end - first)),
+        _ => None,
+    }
+}
+
 pub fn line_number_at_row(
     data: &[u8],
     row: usize,

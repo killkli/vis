@@ -54,6 +54,22 @@ pub struct RenderView<'a> {
     pub prompt_executing: bool,
     /// First display row to show for this frame, before cursor auto-follow.
     pub topline: Option<usize>,
+    /// The byte the view starts at, when a scroll named one.
+    ///
+    /// The original editor addresses its view by a byte offset, so a view can
+    /// begin in the middle of a long line.
+    pub scroll_start: Option<usize>,
+    /// The cursor left the view by a line motion.
+    ///
+    /// The original editor scrolls a line motion so the cursor lands on the
+    /// last row of the view, and every other motion scrolls back by half a
+    /// screen.
+    pub line_motion: bool,
+    /// The byte the anchored view line starts at, when the text moved it.
+    ///
+    /// The original editor keeps the start of its view on a text mark, so the
+    /// view follows the text when the text changes above it.
+    pub anchor_start: Option<usize>,
     /// First display row of the anchored view line. Native `view->start_mark`
     /// keeps the visible content in place when the text changes above it.
     pub anchor: Option<usize>,
@@ -75,6 +91,11 @@ pub struct ViewGeometry {
     pub total_height: usize,
     /// First displayed soft-wrapped row.
     pub top: usize,
+    /// The byte the view starts at.
+    ///
+    /// The original editor keeps the start of its view on a text mark, so the
+    /// view follows the text when the text changes above it.
+    pub start: Option<usize>,
     pub bytes: Range<usize>,
     pub lines: Range<usize>,
 }
@@ -595,6 +616,9 @@ impl Terminal {
             &[RenderView {
                 id: 0,
                 data: &data,
+                scroll_start: None,
+                line_motion: false,
+                anchor_start: None,
                 cursor: editor.cursor,
                 selections: editor.selections(),
                 anchored: &anchored,
@@ -695,6 +719,7 @@ impl Terminal {
                             height: 0,
                             total_height: 0,
                             top: 0,
+                            start: None,
                             bytes: cursor..cursor,
                             lines: line..line,
                         }
@@ -797,6 +822,27 @@ fn terminal_size(tty: &File) -> io::Result<(usize, usize)> {
 
 /// Render a single source character without allowing terminal control sequences.
 /// Returns rendered text, display columns and consumed source bytes.
+/// The text of a cell.
+///
+/// A character that is not wide joins the cell before it, and the cell holds
+/// at most six bytes, as the original editor's cell does.
+fn cell_token(data: &[u8], cell: &crate::view::WrappedCell) -> String {
+    let mut token = display_token(data, cell.pos, cell.column).0;
+    if cell.merged_end > 0 {
+        let base = crate::view::utf8_length(data[cell.pos]);
+        if let Some(bytes) = data.get(cell.pos + base..cell.merged_end) {
+            // The cell holds at most six bytes, so the characters that join it
+            // are cut short when the cell is full.
+            let room = CELL_DATA_LENGTH.saturating_sub(base);
+            token.push_str(&String::from_utf8_lossy(&bytes[..room.min(bytes.len())]));
+        }
+    }
+    token
+}
+
+/// The number of bytes a cell holds, as the original editor's cell does.
+const CELL_DATA_LENGTH: usize = 6;
+
 fn display_token(data: &[u8], pos: usize, column: usize) -> (String, usize, usize) {
     let byte = data[pos];
     if byte == b'\t' {
@@ -942,6 +988,18 @@ fn render_line(
 struct Viewport {
     /// First displayed soft-wrapped row, measured from the start of the buffer.
     top: usize,
+    /// The byte the view starts at.
+    ///
+    /// The original editor addresses its view by a byte offset, so a view can
+    /// begin in the middle of a long line, and the first row is cut at that
+    /// byte.
+    view_start: Option<usize>,
+    /// The byte the view started at in the previous frame.
+    ///
+    /// The original editor keeps the start of its view on a text mark, and it
+    /// restores the start from the mark only when the start did not change.
+    /// A scroll sets the mark to the new start instead.
+    view_start_last: Option<usize>,
     geometry: Option<ViewGeometry>,
     /// Width of the native line number sidebar of the previous frame. The
     /// native editor resizes the view when the sidebar width changes, so the
@@ -964,7 +1022,7 @@ struct PanelFrame {
 
 /// Re-exported for compatibility: coordinate requests share the core layout.
 pub use crate::view::screen_position;
-use crate::view::{CellKind, screen_position_with_layout, walk_cells, walk_cells_with_layout};
+use crate::view::{CellKind, screen_position_with_layout, walk_cells};
 
 /// Zero-based soft-wrapped coordinates for a cursor position.
 #[cfg(test)]
@@ -1015,7 +1073,7 @@ fn wrapped_rows(
     selections: &[Range<usize>],
 ) -> Vec<RenderedLine> {
     wrapped_rows_decorated(
-        data, columns, tab_width, visible, selections, None, true, "", false, false, false,
+        data, columns, tab_width, visible, selections, None, true, "", false, false, false, None,
     )
 }
 
@@ -1033,6 +1091,7 @@ fn wrapped_rows_decorated(
     show_spaces: bool,
     show_tabs: bool,
     show_newlines: bool,
+    view_start: Option<usize>,
 ) -> Vec<RenderedLine> {
     wrapped_rows_decorated_with_layout(
         data,
@@ -1047,9 +1106,51 @@ fn wrapped_rows_decorated(
         show_spaces,
         show_tabs,
         show_newlines,
+        view_start,
     )
 }
 
+/// The byte after the last row the view shows.
+///
+/// The original editor keeps the end of the view as a byte, and a cursor
+/// beyond it leaves the view.
+#[allow(clippy::too_many_arguments)]
+fn view_end_byte(
+    data: &[u8],
+    start: usize,
+    rows: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> usize {
+    let mut end = start;
+    let mut seen = 0usize;
+    crate::view::walk_cells_from_layout(
+        data,
+        start,
+        0,
+        1,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        |cell| {
+            if cell.row >= rows {
+                return false;
+            }
+            seen += 1;
+            end = cell.pos + cell.len;
+            true
+        },
+    );
+    if seen == 0 {
+        return start;
+    }
+    end
+}
+
+/// The byte after the last row the view shows.
 #[allow(clippy::too_many_arguments)]
 fn wrapped_rows_decorated_with_layout(
     data: &[u8],
@@ -1064,6 +1165,7 @@ fn wrapped_rows_decorated_with_layout(
     show_spaces: bool,
     show_tabs: bool,
     show_newlines: bool,
+    view_start: Option<usize>,
 ) -> Vec<RenderedLine> {
     let mut lines: Vec<_> = (visible.clone())
         .map(|_| RenderedLine {
@@ -1074,8 +1176,29 @@ fn wrapped_rows_decorated_with_layout(
     let mut selected = vec![false; lines.len()];
     let mut sequences = vec![String::new(); lines.len()];
     let mut eof_row = None;
-    walk_cells_with_layout(
+    // The walk starts at the byte the view starts at, so the first row is cut
+    // at that byte. The original editor reads the text from the start of its
+    // view, so a view that begins in the middle of a line shows the line from
+    // there.
+    let (start, start_row) = match view_start {
+        Some(start) => {
+            let (row, _) = crate::view::screen_position_with_layout(
+                data,
+                start,
+                physical_columns,
+                wrap_columns,
+                tab_width,
+                breakat,
+            );
+            (start, row)
+        }
+        None => (0, 0),
+    };
+    crate::view::walk_cells_from_layout(
         data,
+        start,
+        start_row,
+        1,
         physical_columns,
         wrap_columns,
         tab_width,
@@ -1127,9 +1250,9 @@ fn wrapped_rows_decorated_with_layout(
                 selected[index] = highlight;
             }
             match cell.kind {
-                CellKind::Source => line
-                    .text
-                    .push_str(&display_token(data, cell.pos, cell.column).0),
+                CellKind::Source => {
+                    line.text.push_str(&cell_token(data, &cell));
+                }
                 CellKind::Replacement => line.text.push('?'),
                 CellKind::Space => line.text.push(if show_spaces { '·' } else { ' ' }),
                 CellKind::Tab => line.text.push(if show_tabs { '›' } else { ' ' }),
@@ -1390,6 +1513,9 @@ fn compose_views_decorated(
             view.display.clone(),
             &overlay,
             view.topline,
+            view.scroll_start,
+            view.line_motion,
+            view.anchor_start,
             view.anchor,
         );
         let body = region
@@ -1423,10 +1549,14 @@ fn compose_views_decorated(
             height: body,
             total_height: region.height,
             top: viewport.top,
+            start: viewport.view_start,
             bytes: start..end.max(start),
             lines: first_line..last_line,
         });
         frame.push_str(&panel.text);
+        // The start of the view is remembered, so the next frame can tell a
+        // scroll from a view that stayed where it was.
+        viewport.view_start_last = viewport.view_start;
         if focused {
             cursor = panel.cursor;
         }
@@ -1525,6 +1655,9 @@ impl Viewport {
             &OverlayContext::default(),
             None,
             None,
+            false,
+            None,
+            None,
         )
     }
 
@@ -1543,6 +1676,9 @@ impl Viewport {
         display: WindowDisplay,
         overlay: &OverlayContext,
         requested_top: Option<usize>,
+        requested_start: Option<usize>,
+        line_motion: bool,
+        anchor_start: Option<usize>,
         anchor: Option<usize>,
     ) -> PanelFrame {
         let (columns, rows) = (region.width, region.height);
@@ -1561,6 +1697,11 @@ impl Viewport {
         // Native line number sidebar: its width follows the visible line
         // numbers and the body is laid out in the remaining columns.
         let layout_columns = columns.saturating_sub(self.sidebar_width).max(1);
+        // The view starts at the byte that the scroll named, so the first row
+        // is cut at that byte, as the original editor does.
+        if let Some(start) = requested_start {
+            self.view_start = Some(start);
+        }
         let sidebar = sidebar_columns(data, self.top, body, layout_columns, tab_width, &display);
         self.sidebar_width = sidebar;
         let text_columns = columns.saturating_sub(sidebar).max(1);
@@ -1571,6 +1712,28 @@ impl Viewport {
         } else {
             text_columns
         };
+        // The original editor keeps the start of its view on a text mark, so
+        // the view follows the text when the text changes above it. The start
+        // is restored from the mark only when it did not change, so a scroll
+        // is not undone.
+        // The original editor keeps the start of its view on a text mark. A
+        // scroll sets the mark to the new start, and the start is restored
+        // from the mark only when it did not change, so the view follows the
+        // text when the text changes above it.
+        let anchor = anchor_start.filter(|_| self.view_start == self.view_start_last);
+        // The view is addressed by a byte, and the row of its first row
+        // follows from that byte, so the two never disagree.
+        if let Some(start) = self.view_start {
+            let (row, _) = crate::view::screen_position_with_layout(
+                data,
+                start,
+                text_columns,
+                wrap_columns,
+                tab_width,
+                &display.breakat,
+            );
+            self.top = row;
+        }
         let (cursor_row, cursor_column) = wrapped_cursor_with_layout(
             data,
             cursor,
@@ -1579,15 +1742,10 @@ impl Viewport {
             tab_width,
             &display.breakat,
         );
-        let cursor_line = crate::view::line_number_at_row_with_layout(
-            data,
-            cursor_row,
-            text_columns,
-            wrap_columns,
-            tab_width,
-            &display.breakat,
-        )
-        .unwrap_or(1);
+        // The original editor reports the line of the cursor's position, not
+        // the line of its display row, so a view that begins in the middle of
+        // a long line still reports the right line.
+        let cursor_line = crate::view::line_number_at_byte(data, cursor);
         let numbers = line_numbers(
             data,
             self.top,
@@ -1610,11 +1768,91 @@ impl Viewport {
                 &display.breakat,
             ));
         } else {
-            if cursor_row < self.top {
-                self.top = cursor_row;
+            // Native `view_cursors_to`: the view is addressed by a byte, and a
+            // cursor that leaves it moves the start of the view to the cursor
+            // and scrolls back by half a screen.
+            let start = self.view_start.unwrap_or(0);
+            // The end of the view is the byte after the last cell of its
+            // last row, as the original editor keeps it.
+            let end = view_end_byte(
+                data,
+                start,
+                body,
+                text_columns,
+                wrap_columns,
+                tab_width,
+                &display.breakat,
+            );
+            if line_motion {
+                // Native `view_line_down` and `view_line_up`: a cursor that
+                // leaves the view scrolls it so the cursor lands on its last
+                // or first row.
+                let back = crate::view::view_start_for_line_motion(
+                    data,
+                    cursor,
+                    body,
+                    text_columns,
+                    wrap_columns,
+                    tab_width,
+                    &display.breakat,
+                );
+                self.view_start = Some(back);
+                let (row, _) = crate::view::screen_position_with_layout(
+                    data,
+                    back,
+                    text_columns,
+                    wrap_columns,
+                    tab_width,
+                    &display.breakat,
+                );
+                self.top = row;
+            } else if cursor < start || cursor > end {
+                // The start of the view moves to the cursor and the view is
+                // scrolled back.
+                let back =
+                    crate::view::view_start_for_cursor(data, cursor, body, text_columns, tab_width);
+                self.view_start = Some(back);
+                // The cursor is still outside the view, so the start of the
+                // line that holds it is used, as the original editor does.
+                let end = view_end_byte(
+                    data,
+                    back,
+                    body,
+                    text_columns,
+                    wrap_columns,
+                    tab_width,
+                    &display.breakat,
+                );
+                if cursor <= back || cursor > end {
+                    let line = crate::motion::line_begin(data, cursor);
+                    self.view_start = Some(line);
+                }
+                let start = self.view_start.unwrap_or(0);
+                let (row, _) = crate::view::screen_position_with_layout(
+                    data,
+                    start,
+                    text_columns,
+                    wrap_columns,
+                    tab_width,
+                    &display.breakat,
+                );
+                self.top = row;
             }
-            if body > 0 && cursor_row >= self.top.saturating_add(body) {
-                self.top = cursor_row + 1 - body;
+            // The view follows the text when the text changed above it and
+            // the view did not move.
+            if let Some(anchor) = anchor {
+                if self.view_start == self.view_start_last {
+                    self.view_start = Some(anchor);
+                    let (row, _) = crate::view::screen_position_with_layout(
+                        data,
+                        anchor,
+                        text_columns,
+                        wrap_columns,
+                        tab_width,
+                        &display.breakat,
+                    );
+                    self.top = row;
+                }
             }
         }
         let mut fallback = ViewDecorations::default();
@@ -1639,7 +1877,8 @@ impl Viewport {
         if let Some(styles) = decorations.filter(|styles| !styles.operations.is_empty()) {
             let text = ordered_panel(
                 data,
-                self.top,
+                0,
+                self.view_start,
                 selections,
                 region,
                 tab_width,
@@ -1679,6 +1918,7 @@ impl Viewport {
             display.showspaces,
             display.showtabs,
             display.shownewlines,
+            self.view_start,
         );
         for (row, rendered) in visible.into_iter().enumerate() {
             frame.push_str(&format!("\x1b[{};{}H", region.y + row + 1, region.x + 1));
@@ -1853,6 +2093,7 @@ fn paint_range(
 fn ordered_panel(
     data: &[u8],
     top: usize,
+    view_start: Option<usize>,
     selections: &[Range<usize>],
     region: Region,
     tab_width: usize,
@@ -1889,11 +2130,21 @@ fn ordered_panel(
     let mut body = vec![blank.clone(); text_width * body_height];
     let mut ui = vec![blank; width * height];
     let mut eof_row = None;
+    let mut last_content_row = None;
     let mut last_source = None;
     let mut source_position = 0;
     let mut visible_start = None;
-    walk_cells_with_layout(
+    // The view is addressed by a byte, so the walk starts there and the rows
+    // it reports are the rows of the view.
+    // The walk starts at the byte the view starts at, so the rows it reports
+    // are the rows of the view.
+    let walk_start = view_start.unwrap_or(0);
+    let walk_row = 0;
+    crate::view::walk_cells_from_layout(
         data,
+        walk_start,
+        walk_row,
+        1,
         text_width,
         wrap_width,
         tab_width,
@@ -1911,30 +2162,31 @@ fn ordered_panel(
             source_position += file_bytes;
             if matches!(cell.kind, CellKind::Eof) {
                 eof_row = Some(cell.row);
+            } else if cell.kind != CellKind::Newline || cell.len > 0 {
+                // The last line that has content. The original editor draws
+                // the end-of-file symbol on the rows after it.
+                last_content_row = Some(cell.row);
             }
-            if cell.row >= top + body_height {
+            if cell.row >= body_height {
                 return false;
             }
-            if cell.row < top {
-                return true;
-            }
-            let row = cell.row - top;
+            let row = cell.row;
             if cell.width == 0 {
                 let mut column = cell.column.min(width);
                 while column > 0 {
                     column -= 1;
                     if body[row * text_width + column].width > 0 {
-                        body[row * width + column]
+                        body[row * text_width + column]
                             .text
                             .push_str(&display_token(data, cell.pos, cell.column).0);
-                        body[row * width + column].file_bytes += file_bytes;
+                        body[row * text_width + column].file_bytes += file_bytes;
                         break;
                     }
                 }
                 return true;
             }
             let token = match cell.kind {
-                CellKind::Source => display_token(data, cell.pos, cell.column).0,
+                CellKind::Source => cell_token(data, &cell),
                 CellKind::Replacement => "?".into(),
                 CellKind::Space => {
                     if show_spaces {
@@ -1983,7 +2235,7 @@ fn ordered_panel(
         },
     );
     if display.showeof {
-        if let Some(eof) = eof_row {
+        if let Some(eof) = last_content_row.or(eof_row) {
             for row in 0..body_height {
                 if top + row > eof {
                     body[row * text_width].text = "~".into();
@@ -2108,6 +2360,8 @@ fn ordered_panel(
         let mut previous = None;
         for cell in cells {
             if cell.width == 0 {
+                // A character that is not wide shares the column of the
+                // character before it, as the original editor draws it.
                 continue;
             }
             if previous != Some(cell.style) {
@@ -2560,6 +2814,9 @@ mod tests {
         RenderView {
             id,
             data,
+            scroll_start: None,
+            line_motion: false,
+            anchor_start: None,
             cursor,
             selections,
             anchored: &[],
@@ -2784,6 +3041,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert!(
             lines[0].text.contains("\x1b[3;32;47ma"),
@@ -2901,6 +3159,7 @@ mod tests {
         let frame = ordered_panel(
             b"ab",
             0,
+            None,
             &[0..1],
             region,
             8,
@@ -2925,6 +3184,7 @@ mod tests {
         let frame = ordered_panel(
             b"ab",
             0,
+            None,
             &[0..1],
             region,
             8,
@@ -2964,6 +3224,7 @@ mod tests {
         let tab = ordered_panel(
             b"A\tZ",
             0,
+            None,
             &[],
             region,
             8,
@@ -2983,6 +3244,7 @@ mod tests {
         let control = ordered_panel(
             b"A\x01Z",
             0,
+            None,
             &[],
             region,
             8,
@@ -3006,6 +3268,7 @@ mod tests {
         let eof = ordered_panel(
             b"A",
             0,
+            None,
             &[],
             region,
             8,
@@ -3033,6 +3296,7 @@ mod tests {
         let frame = ordered_panel(
             b"A \tZ\n",
             0,
+            None,
             &[],
             Region {
                 x: 0,
@@ -3173,6 +3437,9 @@ mod tests {
             &OverlayContext::default(),
             None,
             None,
+            false,
+            None,
+            None,
         );
         // Native `view_max_text_width` wraps the text at the column.
         assert!(panel.text.contains("abcdefghij"), "{:?}", panel.text);
@@ -3208,6 +3475,9 @@ mod tests {
             None,
             display,
             &OverlayContext::default(),
+            None,
+            None,
+            false,
             None,
             None,
         );
@@ -3248,6 +3518,9 @@ mod tests {
             &overlay,
             None,
             None,
+            false,
+            None,
+            None,
         );
         // Native `view_expand_space` and `view_expand_newline` draw the
         // replacement symbols.
@@ -3284,6 +3557,9 @@ mod tests {
             &overlay,
             None,
             None,
+            false,
+            None,
+            None,
         );
         assert!(panel.text.contains("one"), "{:?}", panel.text);
         assert!(panel.text.contains("three"), "{:?}", panel.text);
@@ -3315,6 +3591,9 @@ mod tests {
             None,
             display,
             &OverlayContext::default(),
+            None,
+            None,
+            false,
             None,
             None,
         );
@@ -3357,6 +3636,9 @@ mod tests {
             &OverlayContext::default(),
             None,
             None,
+            false,
+            None,
+            None,
         );
         assert!(panel.text.contains("1 one"), "{:?}", panel.text);
         assert!(panel.text.contains("2 two"), "{:?}", panel.text);
@@ -3387,6 +3669,9 @@ mod tests {
             &OverlayContext::default(),
             Some(2),
             None,
+            false,
+            None,
+            None,
         );
         assert!(panel.text.contains("\x1b[1;1H"));
         assert!(!panel.text.contains("a "), "row zero is scrolled away");
@@ -3408,6 +3693,9 @@ mod tests {
             &OverlayContext::default(),
             Some(9),
             None,
+            false,
+            None,
+            None,
         );
         assert!(!panel.text.contains('a'));
         assert_eq!(viewport.top, 4);
@@ -3418,10 +3706,14 @@ mod tests {
         let mut viewport = Viewport::default();
         let data = b"one\ntwo\nthree\n0123456789";
         let frame = viewport.frame(data, data.len(), &[], "status", None, (5, 3));
-        // C view_add_cell wraps a full row before its newline cell, so the
-        // five-byte "three" line uses two screen rows at this width.
-        assert_eq!(viewport.top, 5);
-        assert!(frame.contains("\x1b[1;1H56789"));
+        // The view is addressed by a byte. The original editor moves the
+        // start of the view to the cursor and scrolls back by half a screen,
+        // so the start lands on the last line, whose row follows from the
+        // five-byte "three" line using two screen rows at this width.
+        assert_eq!(viewport.top, 4);
+        // The view starts at the last line, so its first row holds the
+        // beginning of that line.
+        assert!(frame.contains("\x1b[1;1H01234"));
         assert!(frame.ends_with("\x1b[2;1H\x1b[?25h"));
         let frame = viewport.frame(data, 0, &[], "status", Some(":long command"), (5, 1));
         assert!(frame.ends_with("\x1b[1;5H\x1b[?25h"));

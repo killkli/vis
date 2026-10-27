@@ -373,7 +373,7 @@ impl UserData for Handle {
             },
         );
         methods.add_meta_method(MetaMethod::Len, |_, h, ()| match h.kind {
-            Kind::Lines => h.with_text(|t| line_count(&t.to_vec())),
+            Kind::Lines => h.with_text(|t| line_count(t.shared_bytes().as_slice())),
             Kind::Selections => Ok(h.selections()?.len()),
             Kind::Marks => {
                 h.window_file()?;
@@ -446,7 +446,7 @@ impl Handle {
             }
             Kind::Lines => {
                 let line = position(key)?;
-                let bytes = self.with_text(Text::to_vec)?;
+                let bytes = self.with_text(|text| text.shared_bytes())?;
                 return match line_start(&bytes, line) {
                     Some(start) => Ok(Value::String(
                         lua.create_string(&bytes[start..motion::line_end(&bytes, start)])?,
@@ -543,7 +543,7 @@ impl Handle {
                     .workspace
                     .try_borrow()
                     .map_err(Error::external)?
-                    .with_buffer(file_id, Text::to_vec)
+                    .with_buffer(file_id, |text| text.shared_bytes())
                     .ok_or_else(|| invalid("file is closed"))?;
                 match name.as_deref() {
                     Some("pos") => {
@@ -726,7 +726,7 @@ impl Handle {
                     .workspace
                     .try_borrow()
                     .map_err(Error::external)?
-                    .with_buffer(file_id, Text::to_vec)
+                    .with_buffer(file_id, |text| text.shared_bytes())
                     .ok_or_else(|| invalid("file is closed"))?;
                 match name.as_deref() {
                     Some("pos") => {
@@ -895,9 +895,11 @@ pub(crate) fn register(inner: &Rc<Inner>) -> Result<()> {
             let line = position(l)?;
             let column = c.map(position).transpose()?;
             h.with_text(|t| {
-                let bytes = t.to_vec();
-                let p = line_start(&bytes, line)?;
-                Some(column.map_or(p, |c| motion::line_char_set(&bytes, p, c.saturating_sub(1))))
+                let bytes = t.shared_bytes();
+                let p = line_start(bytes.as_slice(), line)?;
+                Some(column.map_or(p, |c| {
+                    motion::line_char_set(bytes.as_slice(), p, c.saturating_sub(1))
+                }))
             })
         })?,
     )?;
@@ -906,7 +908,7 @@ pub(crate) fn register(inner: &Rc<Inner>) -> Result<()> {
         lua.create_function(|_, (ud, p): (AnyUserData, Value)| {
             let h = handle(ud, Kind::File)?;
             let pos = position(p)?;
-            h.with_text(|t| line_column(&t.to_vec(), pos))
+            h.with_text(|t| line_column(t.shared_bytes().as_slice(), pos))
         })?,
     )?;
     for (name, big) in [("text_object_word", false), ("text_object_longword", true)] {
@@ -915,7 +917,9 @@ pub(crate) fn register(inner: &Rc<Inner>) -> Result<()> {
             lua.create_function(move |lua, (ud, p): (AnyUserData, Value)| {
                 let h = handle(ud, Kind::File)?;
                 let pos = position(p)?;
-                let r = h.with_text(|t| motion::word_object(&t.to_vec(), pos, false, big))?;
+                let r = h.with_text(|t| {
+                    motion::word_object(t.shared_bytes().as_slice(), pos, false, big)
+                })?;
                 if r.start <= r.end {
                     Ok(Some(push_range(lua, r)?))
                 } else {
@@ -929,7 +933,8 @@ pub(crate) fn register(inner: &Rc<Inner>) -> Result<()> {
         lua.create_function(|lua, (ud, start): (AnyUserData, Option<Value>)| {
             let h = handle(ud, Kind::File)?;
             let line = start.map(position).transpose()?.unwrap_or(1);
-            let mut pos = h.with_text(|t| line_start(&t.to_vec(), line).unwrap_or(t.len()))?;
+            let mut pos =
+                h.with_text(|t| line_start(t.shared_bytes().as_slice(), line).unwrap_or(t.len()))?;
             lua.create_function_mut(move |lua, (): ()| {
                 let Some((bytes, next)) = h.with_text(|t| next_line(t, pos))? else {
                     return Ok(None);
@@ -1084,7 +1089,7 @@ fn register_window(inner: &Rc<Inner>) -> Result<()> {
                 .workspace
                 .try_borrow()
                 .map_err(Error::external)?
-                .with_buffer(file_id, Text::to_vec)
+                .with_buffer(file_id, |text| text.shared_bytes())
                 .ok_or_else(|| invalid("file is closed"))?;
             let pos = line_start(&bytes, line)
                 .map(|start| motion::line_char_set(&bytes, start, col.saturating_sub(1)))

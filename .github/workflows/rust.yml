@@ -24,6 +24,12 @@ jobs:
         run: cargo +stable test --manifest-path rust/Cargo.toml --all-targets --locked --no-default-features
       - name: Release build
         run: cargo +stable build --manifest-path rust/Cargo.toml --locked --release
+      - name: Library for the C differentials
+        # The differentials compile a driver against the library of the port.
+        # The release profile links with a thin LTO, so its library holds
+        # bitcode that a plain rustc cannot link. The debug library has the
+        # same behaviour and links directly.
+        run: cargo +stable build --manifest-path rust/Cargo.toml --locked --lib
       - name: Headless terminal checks
         if: runner.os != 'Windows'
         run: python3 rust/tests/terminal_smoke.py --binary rust/target/release/vis-rs
@@ -41,10 +47,22 @@ jobs:
         run: python3 rust/tests/history_differential.py
       - name: Wrapped coordinates against original C
         if: runner.os != 'Windows'
-        run: python3 rust/tests/view_differential.py --library-dir rust/target/release
+        run: python3 rust/tests/view_differential.py --library-dir rust/target/debug
+      - name: Style parsing and merging against original C
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/style_differential.py --library-dir rust/target/debug
       - name: Menu behavior against C
         if: runner.os != 'Windows'
         run: python3 rust/tests/menu_differential.py --rust-menu rust/target/release/vis-menu-rs
+      - name: Motion and word-object semantics against C
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/motion_differential.py
+      - name: Regex matching against the platform library
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/regex_differential.py
+      - name: Interactive latency against C
+        if: runner.os != 'Windows'
+        run: python3 rust/tests/latency_probe.py --binary rust/target/release/vis-rs
 
   lua:
     strategy:
@@ -57,8 +75,12 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component clippy
       - name: Lint optional Lua integration
         run: cargo +stable clippy --manifest-path rust/Cargo.toml --all-features --all-targets --locked -- -D warnings
+      - name: Lint the native LPeg loader
+        run: cargo +stable clippy --manifest-path rust/Cargo.toml -p vis-lpeg-native --all-targets --locked -- -D warnings
       - name: Test optional Lua integration
         run: cargo +stable test --manifest-path rust/Cargo.toml --all-features --all-targets --locked
+      - name: Test the native LPeg loader
+        run: cargo +stable test --manifest-path rust/Cargo.toml -p vis-lpeg-native --all-targets --locked
       - name: Build Lua editor and replay
         run: cargo +stable build --manifest-path rust/Cargo.toml --features lua --examples --bins --locked
       - name: Lua CLI and terminal integration

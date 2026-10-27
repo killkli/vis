@@ -143,6 +143,18 @@ pub struct Text {
     current: usize,
     saved: usize,
     group_open: bool,
+    /// The number of changes to the text.
+    ///
+    /// The identity of the content has to change whenever the bytes change,
+    /// so a copy of the content can be kept while it is unchanged. Counting
+    /// the changes is constant in time, unlike hashing the bytes.
+    edits: u64,
+    /// A shared copy of the bytes of the text.
+    ///
+    /// The text is a piece table, so its bytes are not always contiguous.
+    /// A reader that only reads the bytes borrows this copy instead of
+    /// copying the document, which is the cost of a frame.
+    bytes: Arc<Vec<u8>>,
 }
 
 impl Default for Text {
@@ -185,6 +197,8 @@ impl Text {
             current: 0,
             saved: 0,
             group_open: false,
+            edits: 0,
+            bytes: Arc::new(data.to_vec()),
         }
     }
 
@@ -250,6 +264,26 @@ impl Text {
             bytes.extend_from_slice(chunk);
         }
         bytes
+    }
+
+    /// The bytes of the text, without copying them.
+    ///
+    /// The text keeps a shared copy of its bytes, so a reader borrows them
+    /// instead of copying the document. The copy is shared, so the reader can
+    /// keep it while the text is changed.
+    pub fn shared_bytes(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.bytes)
+    }
+
+    /// An identity of the content that changes with every edit.
+    ///
+    /// The revision time groups the edits of an undo step, so it does not
+    /// change for every edit. The identity is used to keep a copy of the
+    /// content while it is unchanged, so it has to change whenever the bytes
+    /// change. Counting the changes is constant in time, unlike hashing the
+    /// bytes of the document.
+    pub fn content_id(&self) -> u64 {
+        self.edits
     }
 
     pub fn byte(&self, pos: usize) -> Option<u8> {
@@ -324,6 +358,7 @@ impl Text {
 
     fn replace_at(&mut self, range: Range<usize>, data: &[u8], time: i64) -> Result<(), TextError> {
         self.validate(&range)?;
+        self.edits += 1;
         if range.is_empty() && data.is_empty() {
             return Ok(());
         }
@@ -362,7 +397,17 @@ impl Text {
             revision.len = new_len;
             revision.redo_pos = range.start + data.len();
         }
+        self.refresh_bytes();
         Ok(())
+    }
+
+    /// Keep the shared copy of the bytes in step with the text.
+    fn refresh_bytes(&mut self) {
+        let mut bytes = Vec::with_capacity(self.len());
+        for chunk in self.chunks() {
+            bytes.extend_from_slice(chunk);
+        }
+        self.bytes = Arc::new(bytes);
     }
 
     fn copy_range(&self, range: Range<usize>, output: &mut Vec<Piece>) {
@@ -400,12 +445,16 @@ impl Text {
         let parent = self.revision().parent?;
         let pos = self.revision().undo_pos;
         self.current = parent;
+        self.edits += 1;
+        self.refresh_bytes();
         Some(pos)
     }
 
     pub fn redo(&mut self) -> Option<usize> {
         self.snapshot();
         self.current = self.revision().next?;
+        self.edits += 1;
+        self.refresh_bytes();
         Some(self.revision().redo_pos)
     }
 
@@ -500,6 +549,8 @@ impl Text {
             pos = self.revisions[target].redo_pos;
         }
         self.current = target;
+        self.edits += 1;
+        self.refresh_bytes();
         Some(pos)
     }
 
@@ -814,6 +865,55 @@ mod tests {
         text.insert(usize::MAX, b"").unwrap();
         text.delete(usize::MAX..usize::MAX).unwrap();
         assert_eq!(text.undo(), None);
+    }
+
+    /// The shared copy of the bytes must always be the bytes of the text.
+    ///
+    /// A reader borrows the shared copy instead of copying the document, so
+    /// a copy that is out of step would show a stale document.
+    #[test]
+    fn the_shared_bytes_follow_every_change_of_the_text() {
+        let mut text = Text::from_bytes(b"one two\nthree four\n");
+        assert_eq!(text.shared_bytes().as_slice(), b"one two\nthree four\n");
+        text.insert(0, b"new\n").unwrap();
+        assert_eq!(
+            text.shared_bytes().as_slice(),
+            b"new\none two\nthree four\n"
+        );
+        text.delete(0..4).unwrap();
+        assert_eq!(text.shared_bytes().as_slice(), b"one two\nthree four\n");
+        text.replace(4..7, b"two").unwrap();
+        assert_eq!(text.shared_bytes().as_slice(), b"one two\nthree four\n");
+        // An undo and a redo change the bytes as well.
+        text.snapshot();
+        text.insert(0, b"more\n").unwrap();
+        assert_eq!(
+            text.shared_bytes().as_slice(),
+            b"more\none two\nthree four\n"
+        );
+        text.undo().unwrap();
+        assert_eq!(text.shared_bytes().as_slice(), b"one two\nthree four\n");
+        text.redo().unwrap();
+        assert_eq!(
+            text.shared_bytes().as_slice(),
+            b"more\none two\nthree four\n"
+        );
+    }
+
+    /// The identity of the content changes with every change of the bytes.
+    ///
+    /// The identity keeps a copy of the content while the content is
+    /// unchanged, so it has to change whenever the bytes change.
+    #[test]
+    fn the_content_identity_changes_with_the_bytes() {
+        let mut text = Text::from_bytes(b"one\n");
+        let before = text.content_id();
+        text.insert(3, b"two\n").unwrap();
+        assert_ne!(text.content_id(), before);
+        let after = text.content_id();
+        // A second edit in the same undo group changes the identity too.
+        text.insert(0, b"zero\n").unwrap();
+        assert_ne!(text.content_id(), after);
     }
 
     #[test]

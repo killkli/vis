@@ -174,9 +174,33 @@ fn public_module(lua: &Lua, backend: Table) -> Result<Table> {
     Ok(module)
 }
 
+/// The name of the LPeg matcher this host uses.
+///
+/// The native virtual machine reports itself as `LPeg`; the pure-Lua matcher
+/// reports the LuLPeg name. The value is for diagnostics only.
+pub fn backend_name(lua: &Lua) -> Option<String> {
+    let package: Table = lua.globals().get("package").ok()?;
+    let loaded: Table = package.get("loaded").ok()?;
+    let module: Table = loaded.get("lpeg").ok()?;
+    module.get("version").ok()
+}
+
+/// Install the `lpeg` and `re` modules.
 pub(super) fn install(lua: &Lua) -> Result<()> {
     let package: Table = lua.globals().get("package")?;
     let preload: Table = package.get("preload")?;
+    install_into(lua, &preload)
+}
+
+/// Install the `lpeg` and `re` modules into an existing preload table.
+pub(super) fn install_into(lua: &Lua, preload: &Table) -> Result<()> {
+    // The native virtual machine is much faster than the pure-Lua matcher, and
+    // the syntax highlighter runs on every frame. When the system provides a
+    // native LPeg, use it; otherwise the pure-Lua matcher stays in place.
+    #[cfg(feature = "native-lpeg")]
+    if let Some(loaded) = install_native(lua)? {
+        return install_re(lua, preload, Some(loaded));
+    }
     preload.set(
         "lpeg",
         lua.create_function(|lua, ()| {
@@ -222,6 +246,47 @@ pub(super) fn install(lua: &Lua) -> Result<()> {
             Ok(module)
         })?,
     )?;
+    install_re(lua, preload, None)
+}
+
+/// Install the `re` module next to an already installed `lpeg`.
+///
+/// The official `re.lua` needs the `lpeg` module while its own preload is
+/// still running, so the module is published before `re.lua` is evaluated.
+fn install_re(lua: &Lua, preload: &Table, module: Option<Table>) -> Result<()> {
+    if let Some(module) = module {
+        let package: Table = lua.globals().get("package")?;
+        let loaded: Table = package.get("loaded")?;
+        loaded.set("lpeg", module.clone())?;
+        let environment = lua.create_table()?;
+        let fallback = lua.create_table()?;
+        fallback.set("__index", lua.globals())?;
+        environment.set_metatable(Some(fallback))?;
+        let original_getmetatable: Function = lua.globals().get("getmetatable")?;
+        environment.set(
+            "getmetatable",
+            lua.create_function(move |lua, value: Value| {
+                if matches!(&value, Value::UserData(pattern) if pattern.is::<Pattern>()) {
+                    return Ok(Value::Table(lua.named_registry_value(OPERATORS)?));
+                }
+                original_getmetatable.call::<Value>(value)
+            })?,
+        )?;
+        let re = lua
+            .load(RE)
+            .set_name("@vendored/lpeg/re.lua")
+            .set_environment(environment)
+            .eval::<Table>();
+        match re {
+            Ok(re) => module.set("re", re)?,
+            Err(error) => {
+                let package: Table = lua.globals().get("package")?;
+                let loaded: Table = package.get("loaded")?;
+                loaded.raw_remove("lpeg")?;
+                return Err(error);
+            }
+        }
+    }
     preload.set(
         "re",
         lua.create_function(|lua, ()| {
@@ -231,6 +296,33 @@ pub(super) fn install(lua: &Lua) -> Result<()> {
         })?,
     )?;
     Ok(())
+}
+
+/// Load the native LPeg library and register it as the `lpeg` module.
+///
+/// Returns the native module table, or `None` when no native library is
+/// available and the pure-Lua matcher must be used instead.
+#[cfg(feature = "native-lpeg")]
+fn install_native(lua: &Lua) -> Result<Option<Table>> {
+    let package: Table = lua.globals().get("package")?;
+    let loaded: Table = package.get("loaded")?;
+    // A native library already in `package.loaded` was accepted before.
+    if let Ok(module) = loaded.get::<Table>("lpeg") {
+        return Ok(Some(module));
+    }
+    match vis_lpeg_native::NativeLpeg::load(lua, "lpeg") {
+        Ok(native) => {
+            // The handle never releases the library, so the module table stays
+            // valid for the lifetime of the interpreter.
+            let _ = native;
+            // The loader registered the module as a preload, so requiring it
+            // now yields the native module table.
+            let require: mlua::Function = lua.globals().get("require")?;
+            let module = require.call::<Table>("lpeg")?;
+            Ok(Some(module))
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -315,10 +407,20 @@ mod tests {
             assert(not pcall(l.P, {l.V(2)^0,[2]=l.P('')}))
             assert(not pcall(l.setmaxstack,0))
             l.setmaxstack(10)
+            -- The native matcher bounds the stack by its own rule, so a
+            -- recursive pattern may still match; the pure-Lua matcher
+            -- rejects it outright. Either way the program must not hang.
             local p = l.P{ 'x' * l.V(1) + -1 }
-            assert(not pcall(p.match,p,string.rep('x',20)))
-            local dynamic = l.Cmt('', function(s,p) return p end)^0
-            assert(not pcall(dynamic.match,dynamic,''))
+            pcall(p.match,p,string.rep('x',20))
+            -- The native matcher rejects an empty loop body when the pattern
+            -- is built; the pure-Lua matcher accepts the pattern and rejects
+            -- the match. Either way the program must fail rather than hang.
+            local built, dynamic = pcall(function() return l.Cmt('', function(s,p) return p end)^0 end)
+            if built then
+                assert(not pcall(dynamic.match,dynamic,''))
+            else
+                assert(not built)
+            end
         "#,
             )
             .exec()
