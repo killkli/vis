@@ -13,11 +13,80 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub(crate) struct ObjectState {
     pub(crate) styles: HashMap<usize, String>,
     pub(crate) windows: HashMap<usize, WindowVisual>,
+    coordinates: HashMap<usize, FileCoordinates>,
+}
+
+/// Native text line-number lookups keep their previous byte position. Retain
+/// the immutable bytes so the identity also changes on same-length edits.
+struct FileCoordinates {
+    bytes: Arc<Vec<u8>>,
+    position: usize,
+    line: usize,
+    column: usize,
+}
+
+impl ObjectState {
+    fn line_column(&mut self, file: usize, bytes: Arc<Vec<u8>>, position: usize) -> (usize, usize) {
+        let position = position.min(bytes.len());
+        let previous = self
+            .coordinates
+            .get(&file)
+            .filter(|previous| Arc::ptr_eq(&bytes, &previous.bytes));
+        if let Some(previous) = previous.filter(|previous| previous.position == position) {
+            return (previous.line, previous.column);
+        }
+        let line = match previous {
+            Some(previous) if previous.position <= position => {
+                previous.line
+                    + bytes[previous.position..position]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count()
+            }
+            Some(previous) => {
+                previous.line
+                    - bytes[position..previous.position]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count()
+            }
+            None => {
+                1 + bytes[..position]
+                    .iter()
+                    .filter(|&&byte| byte == b'\n')
+                    .count()
+            }
+        };
+        let column = motion::line_char_get(&bytes, position) + 1;
+        self.coordinates.insert(
+            file,
+            FileCoordinates {
+                bytes,
+                position,
+                line,
+                column,
+            },
+        );
+        (line, column)
+    }
+}
+
+fn cached_line_column(
+    inner: &Inner,
+    file: usize,
+    bytes: Arc<Vec<u8>>,
+    position: usize,
+) -> (usize, usize) {
+    inner
+        .object_state
+        .borrow_mut()
+        .line_column(file, bytes, position)
 }
 
 #[derive(Default)]
@@ -216,11 +285,13 @@ pub(crate) fn cleanup(inner: &Rc<Inner>) -> Result<()> {
             _ => workspace.window_file_id(h.id).is_some(),
         }
     });
-    inner
-        .object_state
-        .borrow_mut()
+    let mut state = inner.object_state.borrow_mut();
+    state
         .windows
         .retain(|id, _| workspace.window_file_id(*id).is_some());
+    state
+        .coordinates
+        .retain(|id, _| workspace.with_buffer(*id, |_| ()).is_some());
     Ok(())
 }
 
@@ -327,6 +398,7 @@ fn line_count(bytes: &[u8]) -> usize {
         bytes.iter().filter(|b| **b == b'\n').count() + usize::from(bytes.last() != Some(&b'\n'))
     }
 }
+#[cfg(test)]
 fn line_column(bytes: &[u8], position: usize) -> (usize, usize) {
     let p = position.min(bytes.len());
     (
@@ -555,10 +627,14 @@ impl Handle {
                             .map_or(Value::Nil, |pos| Value::Integer(pos as i64)));
                     }
                     Some("line") => {
-                        return Ok(Value::Integer(line_column(&bytes, sel.cursor).0 as i64));
+                        return Ok(Value::Integer(
+                            cached_line_column(&inner, file_id, bytes, sel.cursor).0 as i64,
+                        ));
                     }
                     Some("col") => {
-                        return Ok(Value::Integer(line_column(&bytes, sel.cursor).1 as i64));
+                        return Ok(Value::Integer(
+                            cached_line_column(&inner, file_id, bytes, sel.cursor).1 as i64,
+                        ));
                     }
                     Some("number") => {
                         return Ok(Value::Integer(
@@ -908,7 +984,9 @@ pub(crate) fn register(inner: &Rc<Inner>) -> Result<()> {
         lua.create_function(|_, (ud, p): (AnyUserData, Value)| {
             let h = handle(ud, Kind::File)?;
             let pos = position(p)?;
-            h.with_text(|t| line_column(t.shared_bytes().as_slice(), pos))
+            let bytes = h.with_text(Text::shared_bytes)?;
+            let inner = h.inner()?;
+            Ok(cached_line_column(&inner, h.id, bytes, pos))
         })?,
     )?;
     for (name, big) in [("text_object_word", false), ("text_object_longword", true)] {
@@ -1187,6 +1265,31 @@ mod tests {
     use crate::lua::Runtime;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn cached_file_coordinates_follow_queries_edits_and_distinct_files() {
+        let mut state = super::ObjectState::default();
+        let mut bytes = std::sync::Arc::new("a界b\u{301}\n\nlast\n".as_bytes().to_vec());
+        for pass in 0..3 {
+            if pass == 1 {
+                std::sync::Arc::make_mut(&mut bytes)[0] = b'\n';
+            }
+            if pass == 2 {
+                std::sync::Arc::make_mut(&mut bytes).extend_from_slice(b"\xfftail");
+            }
+            for position in (0..=bytes.len() + 2).chain((0..=bytes.len() + 2).rev()) {
+                assert_eq!(
+                    state.line_column(1, bytes.clone(), position),
+                    super::line_column(&bytes, position)
+                );
+                let other = std::sync::Arc::new(b"other\nfile".to_vec());
+                assert_eq!(
+                    state.line_column(2, other.clone(), 7),
+                    super::line_column(&other, 7)
+                );
+            }
+        }
+    }
 
     struct Config(PathBuf);
     impl Config {
@@ -1517,7 +1620,7 @@ mod tests {
     fn measured_viewport_styles_and_status_reach_owned_render_model() {
         let (_config, runtime) = runtime(b"abcdefgh\n");
         let window = runtime.workspace().borrow().active_window_id();
-        runtime.set_viewport(window, 40, 10, 11, 0..9, 1..2);
+        runtime.set_viewport(window, 40, 40, 10, 11, 0..9, 1..2);
         runtime
             .eval(
                 r#"
@@ -1557,7 +1660,7 @@ mod tests {
     fn native_style_finish_is_inclusive_for_points_utf8_and_eof() {
         let (_config, runtime) = runtime("aλz".as_bytes());
         let window = runtime.workspace().borrow().active_window_id();
-        runtime.set_viewport(window, 20, 4, 5, 0..4, 1..1);
+        runtime.set_viewport(window, 20, 20, 4, 5, 0..4, 1..1);
         runtime
             .eval(
                 r#"

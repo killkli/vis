@@ -278,7 +278,9 @@ fn jumps_center_the_cursor_when_it_leaves_the_body() {
     measure(&mut ws, 80, 23, 38);
     keys(&mut ws, "80G");
     // Native `view_cursors_to` centers a cursor that left the visible body.
-    assert_eq!(ws.editor.scroll_request(), Some(79 - 11));
+    // Following names a byte; rendering resolves its document row later.
+    let expected = vis::view::row_start(text.as_bytes(), 79 - 11, 80, 8);
+    assert_eq!(ws.editor.scroll_start(), expected);
 }
 
 #[test]
@@ -292,4 +294,31 @@ fn line_motions_keep_the_incremental_native_follow() {
     // is issued and the renderer keeps the cursor on the last visible row.
     assert_eq!(ws.editor.scroll_request(), None);
     assert_eq!(ws.editor.cursor, 9 * 69);
+}
+
+#[test]
+fn control_page_aliases_move_like_named_page_keys() {
+    let data = b"one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
+    for visual in [false, true] {
+        for (alias, named) in [
+            (Key::Ctrl('f'), Key::PageDown),
+            (Key::Ctrl('b'), Key::PageUp),
+        ] {
+            let mut actual = workspace(data);
+            let mut expected = workspace(data);
+            for ws in [&mut actual, &mut expected] {
+                measure(ws, 8, 3, 0);
+                ws.anchor_window_view(ws.active_window_id(), Some(0), 0);
+                keys(ws, "L");
+                if visual {
+                    keys(ws, "v");
+                }
+            }
+            actual.handle_key(alias).unwrap();
+            expected.handle_key(named).unwrap();
+            assert_eq!(actual.editor.cursor, expected.editor.cursor);
+            assert_eq!(actual.editor.scroll_start(), expected.editor.scroll_start());
+            assert_eq!(actual.editor.selections(), expected.editor.selections());
+        }
+    }
 }

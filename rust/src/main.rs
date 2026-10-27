@@ -704,8 +704,7 @@ impl InteractiveHost {
         }
     }
 
-    #[cfg(feature = "lua")]
-    fn draw_lua(&self, terminal: &InteractiveTerminal, message: &mut String) -> HostResult<bool> {
+    fn measure_current(&self, terminal: &InteractiveTerminal, message: &str) -> HostResult<bool> {
         let Some((frames, layout, active)) = self.snapshot() else {
             return Ok(true);
         };
@@ -714,15 +713,25 @@ impl InteractiveHost {
             terminal.measure_views_with_message(&views, active, layout, message)
         })?;
         self.publish_geometry(&geometry);
+        #[cfg(feature = "lua")]
         for geometry in geometry {
             self.runtime.set_viewport(
                 geometry.id,
                 geometry.width,
+                geometry.text_width,
                 geometry.height,
                 geometry.total_height,
                 geometry.bytes,
                 geometry.lines,
             );
+        }
+        Ok(false)
+    }
+
+    #[cfg(feature = "lua")]
+    fn draw_lua(&self, terminal: &InteractiveTerminal, message: &mut String) -> HostResult<bool> {
+        if self.measure_current(terminal, message)? {
+            return Ok(true);
         }
         if self.report(
             self.runtime
@@ -765,7 +774,7 @@ impl InteractiveHost {
             workspace.set_window_viewport(
                 item.id,
                 vis::view::ViewportMetrics {
-                    width: item.width,
+                    width: item.text_width,
                     height: item.height,
                     top: item.top,
                     wrapcolumn: 0,
@@ -773,7 +782,7 @@ impl InteractiveHost {
             );
             // The view is anchored to the byte it starts at, so the text
             // changing above it keeps the visible content in place.
-            workspace.anchor_window_view(item.id, item.start, item.top);
+            workspace.anchor_window_view(item.id, Some(item.bytes.start), item.top);
         }
     }
 }
@@ -785,6 +794,7 @@ fn render_views(frames: &[vis::workspace::Frame]) -> Vec<vis::terminal::RenderVi
         .map(|frame| vis::terminal::RenderView {
             id: frame.id,
             data: frame.bytes.as_slice(),
+            snapshot: Some(&frame.bytes),
             scroll_start: frame.scroll_start,
             line_motion: frame.line_motion,
             anchor_start: frame.anchor_start,
@@ -960,13 +970,23 @@ fn run_interactive_session(
     #[cfg(feature = "lua")]
     host.remove_interrupt_hook();
     terminal.initialize(stdin_consumed)?;
+    let mut pending_event = None;
     loop {
-        let (quit, updated) = host.draw(terminal, &message)?;
-        if let Some(updated) = updated {
-            message = updated;
-        }
-        if quit {
-            break;
+        if pending_event.is_some() && message.is_empty() {
+            // Native drains the keys from one terminal read before ui_draw.
+            // Update motion geometry between keys without running draw hooks.
+            if host.measure_current(terminal, &message)? {
+                break;
+            }
+            host.workspace.borrow_mut().clear_scroll_requests();
+        } else {
+            let (quit, updated) = host.draw(terminal, &message)?;
+            if let Some(updated) = updated {
+                message = updated;
+            }
+            if quit {
+                break;
+            }
         }
         let event = loop {
             let signal = signals.terminate.load(Ordering::Relaxed);
@@ -974,6 +994,7 @@ fn run_interactive_session(
                 return Err(format!("terminated by signal {signal}").into());
             }
             if signals.interrupt.swap(false, Ordering::Relaxed) {
+                pending_event = None;
                 terminal.with(|terminal| {
                     terminal.cancel_input();
                     Ok(())
@@ -989,7 +1010,11 @@ fn run_interactive_session(
                 terminal.resume()?;
                 break InputEvent::Timeout;
             }
-            let event = match terminal.with(vis::terminal::Terminal::read_event) {
+            let event = match pending_event
+                .take()
+                .map(Ok)
+                .unwrap_or_else(|| terminal.with(vis::terminal::Terminal::read_event))
+            {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 result => result?,
             };
@@ -1037,6 +1062,7 @@ fn run_interactive_session(
         if host.report(outcome, &mut message) {
             break;
         }
+        pending_event = terminal.with(vis::terminal::Terminal::take_pending_event)?;
     }
     Ok(host.exit_code().unwrap_or(0))
 }

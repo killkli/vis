@@ -10,6 +10,9 @@ use std::ops::Range;
 
 use crate::motion;
 
+mod native;
+pub(crate) use native::NativeView;
+
 /// Measured geometry of a focused window's body, as last laid out by the UI.
 /// The editor keeps it so viewport motions use the real screen size and the
 /// scroll position the user is looking at.
@@ -200,7 +203,37 @@ pub fn walk_cells_from_layout(
     wrap_columns: usize,
     tab_width: usize,
     breakat: &str,
+    visit: impl FnMut(WrappedCell) -> bool,
+) {
+    walk_cells_with_row_end(
+        data,
+        start,
+        start_row,
+        start_line,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        visit,
+        |_, _| {},
+    );
+}
+
+/// The native read offset can exceed the bytes retained on a row when word
+/// wrapping moves a suffix off the bottom of a view. Keep it separately from
+/// the cell byte counts used by cursor_set.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_cells_with_row_end(
+    data: &[u8],
+    start: usize,
+    start_row: usize,
+    start_line: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
     mut visit: impl FnMut(WrappedCell) -> bool,
+    mut row_end: impl FnMut(usize, usize),
 ) {
     let tab_width = tab_width.clamp(1, 8);
     let columns = wrap_columns.max(1);
@@ -208,55 +241,38 @@ pub fn walk_cells_from_layout(
     let mut row = start_row;
     let mut line = start_line;
     let mut pos = start.min(data.len());
-    let mut tokens: Vec<Token> = Vec::new();
-    while pos < data.len() {
-        let byte = data[pos];
-        if byte == b'\n' {
-            tokens.push(Token::Newline { pos });
-            let (rows, _, stopped) = place_line(
-                &tokens,
-                row,
-                line,
-                columns,
-                eof_columns,
-                tab_width,
-                breakat,
-                data,
-                &mut visit,
-            );
-            if stopped {
-                return;
+    loop {
+        let at_eof = pos >= data.len();
+        // Decode only as far as the consumer needs. A logical line can span
+        // megabytes while a view needs just a few wrapped rows of it.
+        let mut finished = false;
+        let tokens = std::iter::from_fn(|| {
+            if finished {
+                return None;
             }
-            row += rows;
-            tokens.clear();
-            line += 1;
-            pos += 1;
-        } else if byte == b'\t' {
-            tokens.push(Token::Tab { pos });
-            pos += 1;
-        } else {
-            let len = utf8_length(byte);
-            tokens.push(Token::Text { pos });
-            pos += len;
-        }
-    }
-    if tokens.is_empty() {
-        let _ = visit(WrappedCell {
-            row,
-            line,
-            column: 0,
-            width: 1,
-            pos: data.len(),
-            len: 0,
-            kind: CellKind::Eof,
-            merged_end: 0,
+            let token_pos = pos;
+            if pos >= data.len() {
+                finished = true;
+                return Some(Token::Eof { pos: data.len() });
+            }
+            let token = match data[pos] {
+                b'\n' => {
+                    finished = true;
+                    Token::Newline { pos }
+                }
+                b'\t' => Token::Tab { pos },
+                _ => Token::Text { pos },
+            };
+            pos = token_pos
+                + if matches!(token, Token::Text { .. }) {
+                    utf8_length(data[token_pos])
+                } else {
+                    1
+                };
+            Some(token)
         });
-    } else {
-        // C adds the EOF cell through view_addch, so it can trigger a final
-        // soft wrap and move a word after breakat before the cursor row.
-        tokens.push(Token::Eof { pos: data.len() });
-        let _ = place_line(
-            &tokens,
+        let (rows, _, stopped) = place_line(
+            tokens,
             row,
             line,
             columns,
@@ -265,7 +281,13 @@ pub fn walk_cells_from_layout(
             breakat,
             data,
             &mut visit,
+            &mut row_end,
         );
+        if stopped || at_eof || pos >= data.len() && data.last() != Some(&b'\n') {
+            return;
+        }
+        row += rows;
+        line += 1;
     }
 }
 
@@ -274,7 +296,7 @@ pub fn walk_cells_from_layout(
 /// last cell.
 #[allow(clippy::too_many_arguments)]
 fn place_line(
-    tokens: &[Token],
+    tokens: impl Iterator<Item = Token>,
     base_row: usize,
     line: usize,
     columns: usize,
@@ -283,6 +305,7 @@ fn place_line(
     breakat: &str,
     data: &[u8],
     visit: &mut impl FnMut(WrappedCell) -> bool,
+    row_end: &mut impl FnMut(usize, usize),
 ) -> (usize, usize, bool) {
     // The cells placed on the current row.
     let mut row_cells: Vec<LineCell> = Vec::new();
@@ -299,10 +322,16 @@ fn place_line(
     let mut previous_cell: Option<LineCell> = None;
     // Whether the cell that is held back is on this row.
     let mut previous_on_row = false;
-    let mut index = 0;
-    while index < tokens.len() {
+    let mut read_end = 0;
+    let mut tokens = tokens.peekable();
+    while let Some(token) = tokens.peek() {
+        read_end = match token {
+            Token::Text { pos } => pos + utf8_length(data[*pos]),
+            Token::Tab { pos } | Token::Newline { pos } => pos + 1,
+            Token::Eof { pos } => *pos,
+        };
         if pending.is_empty() {
-            pending = match &tokens[index] {
+            match token {
                 Token::Text { pos } => {
                     let (width, len) = token_metrics(data, *pos, out_column);
                     if width == 0 {
@@ -319,7 +348,7 @@ fn place_line(
                                     last.len = previous.len;
                                 }
                             }
-                            index += 1;
+                            tokens.next();
                             continue;
                         }
                     }
@@ -340,7 +369,7 @@ fn place_line(
                         .get(*pos..*pos + len)
                         .and_then(|bytes| std::str::from_utf8(bytes).ok())
                         .unwrap_or("");
-                    vec![LineCell {
+                    pending.push(LineCell {
                         pos: *pos,
                         len,
                         kind,
@@ -348,27 +377,25 @@ fn place_line(
                         column: 0,
                         brk: !breakat.is_empty() && breakat.contains(text),
                         merged_end: 0,
-                    }]
+                    });
                 }
                 Token::Tab { pos } => {
                     let count = tab_width - out_column % tab_width;
-                    (0..count)
-                        .map(|index| LineCell {
-                            pos: *pos,
-                            len: 1,
-                            kind: if index == 0 {
-                                CellKind::Tab
-                            } else {
-                                CellKind::TabFill
-                            },
-                            width: 1,
-                            column: 0,
-                            brk: false,
-                            merged_end: 0,
-                        })
-                        .collect()
+                    pending.extend((0..count).map(|index| LineCell {
+                        pos: *pos,
+                        len: 1,
+                        kind: if index == 0 {
+                            CellKind::Tab
+                        } else {
+                            CellKind::TabFill
+                        },
+                        width: 1,
+                        column: 0,
+                        brk: false,
+                        merged_end: 0,
+                    }));
                 }
-                Token::Newline { pos } => vec![LineCell {
+                Token::Newline { pos } => pending.push(LineCell {
                     pos: *pos,
                     len: 1,
                     kind: CellKind::Newline,
@@ -376,8 +403,8 @@ fn place_line(
                     column: 0,
                     brk: false,
                     merged_end: 0,
-                }],
-                Token::Eof { pos } => vec![LineCell {
+                }),
+                Token::Eof { pos } => pending.push(LineCell {
                     pos: *pos,
                     len: 0,
                     kind: CellKind::Eof,
@@ -385,8 +412,8 @@ fn place_line(
                     column: 0,
                     brk: false,
                     merged_end: 0,
-                }],
-            };
+                }),
+            }
         }
         let mut cell = pending.remove(0);
         if previous_break && !cell.brk {
@@ -415,12 +442,20 @@ fn place_line(
                     let moved: Vec<LineCell> = row_cells.drain(split..).collect();
                     previous_cell = row_cells.last().cloned();
                     previous_on_row = false;
-                    if !emit_row(&row_cells, base_row + out_row, line, visit) {
+                    if !emit_row(
+                        &row_cells,
+                        base_row + out_row,
+                        line,
+                        cell.pos,
+                        visit,
+                        row_end,
+                    ) {
                         return (out_row, out_column, true);
                     }
                     out_row += 1;
                     out_column = 0;
                     wrap_column = 0;
+                    row_cells.clear();
                     for mut moved_cell in moved {
                         moved_cell.column = out_column;
                         out_column += moved_cell.width;
@@ -433,7 +468,14 @@ fn place_line(
                 None => {
                     previous_cell = row_cells.last().cloned();
                     previous_on_row = false;
-                    if !emit_row(&row_cells, base_row + out_row, line, visit) {
+                    if !emit_row(
+                        &row_cells,
+                        base_row + out_row,
+                        line,
+                        cell.pos,
+                        visit,
+                        row_end,
+                    ) {
                         return (out_row, out_column, true);
                     }
                     out_row += 1;
@@ -452,10 +494,17 @@ fn place_line(
         previous_on_row = true;
         row_cells.push(cell);
         if pending.is_empty() {
-            index += 1;
+            tokens.next();
         }
     }
-    if !emit_row(&row_cells, base_row + out_row, line, visit) {
+    if !emit_row(
+        &row_cells,
+        base_row + out_row,
+        line,
+        read_end.min(data.len()),
+        visit,
+        row_end,
+    ) {
         return (out_row, out_column, true);
     }
     (out_row + 1, out_column, false)
@@ -466,8 +515,11 @@ fn emit_row(
     row_cells: &[LineCell],
     row: usize,
     line: usize,
+    read_end: usize,
     visit: &mut impl FnMut(WrappedCell) -> bool,
+    row_end: &mut impl FnMut(usize, usize),
 ) -> bool {
+    row_end(row, read_end);
     for cell in row_cells {
         if !visit(WrappedCell {
             row,
@@ -612,7 +664,7 @@ fn viewport_up(data: &[u8], position: usize, count: usize, limit: usize) -> usiz
     if position == 0 {
         return 0;
     }
-    let mut remaining = count;
+    let mut remaining = count as isize;
     let mut offset = 0usize;
     let mut index = position - 1;
     if data[index] == b'\n' && index > 0 {
@@ -830,6 +882,38 @@ pub fn screen_position_with_layout(
     tab_width: usize,
     breakat: &str,
 ) -> (usize, usize) {
+    if breakat.is_empty() {
+        if let Some(coordinate) = unbroken_position_from(
+            data,
+            position,
+            0,
+            0,
+            physical_columns,
+            wrap_columns,
+            tab_width,
+            |_, _| {},
+        ) {
+            return coordinate;
+        }
+    }
+    screen_position_by_cells(
+        data,
+        position,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+    )
+}
+
+fn screen_position_by_cells(
+    data: &[u8],
+    position: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> (usize, usize) {
     let position = position.min(data.len());
     let mut coordinate = (0, 0);
     walk_cells_with_layout(
@@ -845,12 +929,177 @@ pub fn screen_position_with_layout(
                 cell.pos <= position && position < cell.pos + cell.len
             };
             if found {
-                coordinate = (cell.row, cell.column);
+                // Native view_coord_get advances over the cell containing an
+                // interior byte, including a combining character merged into it.
+                coordinate = (
+                    cell.row,
+                    cell.column + if position > cell.pos { cell.width } else { 0 },
+                );
             }
             !found
         },
     );
     coordinate
+}
+
+/// Locate a byte in the visible rows of a byte-addressed view.
+/// Unlike document coordinates, this never lays out the prefix of the file.
+#[allow(clippy::too_many_arguments)]
+pub fn screen_position_in_view(
+    data: &[u8],
+    position: usize,
+    start: usize,
+    rows: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+) -> Option<(usize, usize)> {
+    if position < start || position > data.len() {
+        return None;
+    }
+    let mut coordinate = None;
+    walk_cells_from_layout(
+        data,
+        start,
+        0,
+        1,
+        physical_columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        |cell| {
+            if cell.row >= rows {
+                return false;
+            }
+            let found = if position == data.len() {
+                cell.kind == CellKind::Eof
+            } else {
+                cell.pos <= position && position < cell.pos + cell.len
+            };
+            if found {
+                coordinate = Some((cell.row, cell.column));
+            }
+            !found
+        },
+    );
+    coordinate
+}
+
+/// Measure document coordinates without materializing cells when words cannot
+/// reflow. ASCII runs advance arithmetically; special characters use the same
+/// metrics, tab expansion and delayed soft-wrap rules as `place_line`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn unbroken_position_from(
+    data: &[u8],
+    position: usize,
+    start: usize,
+    start_row: usize,
+    physical_columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    mut line_start: impl FnMut(usize, usize),
+) -> Option<(usize, usize)> {
+    let position = position.min(data.len());
+    let columns = wrap_columns.max(1);
+    let tab_width = tab_width.clamp(1, 8);
+    let mut pos = start.min(data.len());
+    let mut row = start_row;
+    let mut column = 0;
+    let mut previous = None;
+    while pos < data.len() {
+        if pos > position {
+            return None;
+        }
+        let end = position.saturating_add(1).min(data.len());
+        let run = data[pos..end]
+            .iter()
+            .position(|byte| !(32..127).contains(byte))
+            .unwrap_or(end - pos);
+        if run > 0 {
+            if position < pos + run {
+                let offset = column + position - pos;
+                return Some((row + offset / columns, offset % columns));
+            }
+            let offset = column + run - 1;
+            row += offset / columns;
+            column = offset % columns + 1;
+            previous = Some((row, column));
+            pos += run;
+            continue;
+        }
+        match data[pos] {
+            b'\n' => {
+                if column == columns {
+                    row += 1;
+                    column = 0;
+                }
+                if position == pos {
+                    return Some((row, column));
+                }
+                pos += 1;
+                row += 1;
+                column = 0;
+                previous = None;
+                line_start(pos, row);
+            }
+            b'\t' => {
+                let count = tab_width - column % tab_width;
+                for _ in 0..count {
+                    if column == columns {
+                        row += 1;
+                        column = 0;
+                    }
+                    if position == pos {
+                        return Some((row, column));
+                    }
+                    previous = Some((row, column + 1));
+                    column += 1;
+                }
+                pos += 1;
+            }
+            byte => {
+                if byte >= 128
+                    && data
+                        .get(pos..pos + utf8_length(byte))
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .is_none()
+                {
+                    // Malformed sequences can make merged-cell byte counts
+                    // cover skipped bytes. Leave those cases to the cell walk.
+                    return None;
+                }
+
+                let (width, len) = token_metrics(data, pos, column);
+                if width == 0 && previous.is_some() {
+                    if pos <= position && position < pos + len {
+                        return previous;
+                    }
+                } else {
+                    let width = if width > columns { 1 } else { width };
+                    if column + width > columns && column > 0 {
+                        row += 1;
+                        column = 0;
+                    }
+                    if pos <= position && position < pos + len {
+                        return Some((row, column + if position > pos { width } else { 0 }));
+                    }
+                    previous = Some((row, column + width));
+                    column += width;
+                }
+                // Match tokenization even for malformed or truncated UTF-8.
+                pos += utf8_length(byte);
+            }
+        }
+    }
+    if position != data.len() {
+        return None;
+    }
+    if column + 1 > physical_columns.max(1) && column > 0 {
+        row += 1;
+        column = 0;
+    }
+    Some((row, column))
 }
 
 /// First source byte of a display row, or `None` when the row is not reached
@@ -942,6 +1191,20 @@ pub fn last_row_with_layout(
     tab_width: usize,
     breakat: &str,
 ) -> usize {
+    if breakat.is_empty() {
+        if let Some((row, _)) = unbroken_position_from(
+            data,
+            data.len(),
+            0,
+            0,
+            physical_columns,
+            wrap_columns,
+            tab_width,
+            |_, _| {},
+        ) {
+            return row;
+        }
+    }
     let mut last = 0;
     walk_cells_with_layout(
         data,
@@ -1087,6 +1350,107 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn arithmetic_coordinates_match_the_cell_walk_including_invalid_utf8() {
+        let tokens: &[&[u8]] = &[
+            b"abc defghijk",
+            b"\n",
+            b"\t",
+            b"\x01",
+            b"\x7f",
+            b"\xff",
+            b"\xe0x",
+            "界".as_bytes(),
+            "\u{301}".as_bytes(),
+            "\u{200d}".as_bytes(),
+            "\u{85}".as_bytes(),
+            "\u{feff}".as_bytes(),
+        ];
+        let mut seed = 0x56574557u32;
+        for case in 0..160 {
+            let mut data = Vec::new();
+            for _ in 0..case % 13 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                data.extend_from_slice(tokens[seed as usize % tokens.len()]);
+            }
+            for columns in [1, 2, 3, 5, 8, 12] {
+                for tab in [1, 4, 8] {
+                    for physical in [columns, columns + 3] {
+                        for position in 0..=data.len() {
+                            let reference = screen_position_by_cells(
+                                &data, position, physical, columns, tab, "",
+                            );
+                            let measured = unbroken_position_from(
+                                &data,
+                                position,
+                                0,
+                                0,
+                                physical,
+                                columns,
+                                tab,
+                                |_, _| {},
+                            );
+                            let Some(measured) = measured else {
+                                assert!(std::str::from_utf8(&data).is_err());
+                                continue;
+                            };
+                            assert_eq!(
+                                measured, reference,
+                                "data={data:?} position={position} columns={columns} physical={physical} tab={tab}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_consumer_does_not_decode_the_rest_of_a_long_line() {
+        let data = vec![b'x'; 1_000_000];
+        let mut decoded = 0;
+        let tokens = (0..data.len()).map(|pos| {
+            decoded += 1;
+            assert!(decoded <= 162, "decoded beyond the requested row");
+            Token::Text { pos }
+        });
+        let (_, _, stopped) = place_line(
+            tokens,
+            0,
+            1,
+            80,
+            80,
+            8,
+            "",
+            &data,
+            &mut |cell| cell.row < 1,
+            &mut |_, _| {},
+        );
+        assert!(stopped);
+    }
+
+    #[test]
+    fn view_coordinates_start_at_the_requested_byte_and_stop_at_the_view_end() {
+        let data = "prefix\n0123456789界a\u{301}tail".as_bytes();
+        let start = 10;
+        assert_eq!(
+            screen_position_in_view(data, start, start, 2, 5, 5, 8, ""),
+            Some((0, 0))
+        );
+        assert_eq!(
+            screen_position_in_view(data, start + 5, start, 2, 5, 5, 8, ""),
+            Some((1, 0))
+        );
+        assert_eq!(
+            screen_position_in_view(data, 0, start, 2, 5, 5, 8, ""),
+            None
+        );
+        assert_eq!(
+            screen_position_in_view(data, data.len(), start, 2, 5, 5, 8, ""),
+            None
+        );
+    }
 
     #[test]
     fn eof_cell_reflows_the_last_word_at_a_custom_break_character() {

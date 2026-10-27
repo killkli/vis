@@ -28,6 +28,10 @@ fn measure(ws: &mut Workspace, top: usize) {
             wrapcolumn: 0,
         },
     );
+    // The host publishes geometry and the byte anchor separately.
+    let data = ws.editor.text.shared_bytes();
+    let start = vis::view::row_start(&data, top, 80, 8);
+    ws.anchor_window_view(id, start, top);
 }
 
 #[test]
@@ -66,4 +70,15 @@ fn the_anchor_survives_a_window_switch() {
     ws.handle_key(Key::Char('w')).unwrap();
     ws.handle_key(Key::Char('w')).unwrap();
     assert_eq!(ws.editor.view_anchor_row(), Some(39));
+}
+
+#[test]
+fn moving_a_byte_view_within_one_document_row_replaces_its_anchor() {
+    let mut ws = workspace(b"abcdefghijklmnop\n");
+    let id = ws.active_window_id();
+    ws.anchor_window_view(id, Some(3), 0);
+    assert_eq!(ws.editor.view_anchor_start(), Some(3));
+    ws.anchor_window_view(id, Some(4), 0);
+    assert_eq!(ws.editor.view_anchor_start(), Some(4));
+    assert_eq!(ws.editor.view_anchor_row(), Some(0));
 }

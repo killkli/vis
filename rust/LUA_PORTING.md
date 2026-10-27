@@ -109,7 +109,7 @@ removed once the configuration has run: the Lua interpreter traces every
 instruction while a hook is set, and the frames of the interactive loop are
 where the time is spent.
 
-## LPeg without native extension loading
+## LPeg fallback and optional native VM
 
 Pinned, licensed LuLPeg supplies a pure-Lua matching engine. A safe mlua userdata
 adapter preserves the pattern type expected by unmodified lexers; official LPeg
@@ -123,6 +123,21 @@ LPeg differential compares 373 capture/grammar/lexer/numeric cases through the
 actual mlua adapter. Passing this bounded corpus does not prove universal LPeg
 VM equivalence: stack accounting, locale, work limits and protected metatables
 remain explicit differences.
+
+The optional `native-lpeg` feature enables Lua and the separate
+`vis-lpeg-native` workspace crate. Its audited unsafe `dlopen`/Lua-ABI boundary
+loads only LPeg and falls back to LuLPeg when a compatible library is unavailable;
+it does not expose arbitrary C-module loading to Lua. The editor crate still
+forbids unsafe Rust. The long-line performance checkpoint uses this feature;
+those latency numbers are not a claim about the pure-Lua fallback's speed.
+
+The 2026-10-28 audit reran all eight original Lua scripts and the full Lua key
+replay: **142 match, zero mismatches/errors, one upstream-disabled fixture**
+(`test/vis/selections/out-of-view.keys`). The strict key runner exits 1 for that
+exclusion. The external pure-Lua/native LPeg corpus also passes **373/373**
+across 160 lexers; its separate Cargo ignore remains explicit. These bounded
+results do not close the API gaps below. See [`HANDOFF.md`](HANDOFF.md) for the
+current project-wide acceptance status.
 
 ## Remaining work
 

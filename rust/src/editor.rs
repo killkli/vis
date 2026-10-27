@@ -2003,8 +2003,15 @@ impl Editor {
             self.view_anchor_byte = 0;
             return;
         };
-        if self.view_anchor_row == Some(row) && self.view_anchor.is_some() {
-            // The row is unchanged and the anchor still fits.
+        if self.view_anchor_row == Some(row)
+            && self.view_anchor_byte == byte
+            && self
+                .view_anchor
+                .as_ref()
+                .and_then(|mark| self.text.mark_get(mark.clone()))
+                == Some(byte)
+        {
+            // Both the measured byte and its tracked mark are unchanged.
             return;
         }
         self.view_anchor = self.text.mark(byte);
@@ -2063,66 +2070,62 @@ impl Editor {
         let viewport = self.viewport;
         let columns = viewport.wrap_width();
         let height = viewport.height.max(1);
-        let top = viewport.top;
-        let data = self.text.to_vec();
-        let (row, _) = crate::view::screen_position_with_layout(
+        let data = self.text.shared_bytes();
+        let start = self
+            .scroll_start
+            .or_else(|| self.view_anchor_start())
+            .unwrap_or(0);
+        if crate::view::screen_position_in_view(
             &data,
             self.cursor,
+            start,
+            height,
             viewport.width,
             columns,
             self.tab_width,
             &self.breakat,
-        );
-        if row < top || row >= top.saturating_add(height) {
-            // Native `view_cursors_to`: the start of the view is placed at the
-            // byte of the cursor and the view is scrolled back by half a
-            // screen, so the view can begin in the middle of a long line. The
-            // cursor is still outside the view when the line that holds it is
-            // longer than the screen, so the start of that line is used.
-            let start = crate::view::view_start_for_cursor(
-                &data,
-                self.cursor,
-                height,
-                viewport.width,
-                self.tab_width,
-            );
-            let (start_row, _) = crate::view::screen_position_with_layout(
-                &data,
-                start,
-                viewport.width,
-                columns,
-                self.tab_width,
-                &self.breakat,
-            );
-            // The cursor is still outside the view when the line that holds
-            // it is longer than the screen, so the start of that line is used,
-            // as the original editor does.
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/follow.log")
-            {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    file,
-                    "FOLLOW start={start} start_row={start_row} row={row} height={height} top={top}"
-                );
-            }
-            if start_row + height <= row {
-                let start = crate::motion::line_begin(&data, self.cursor);
-                let (row, _) = crate::view::screen_position_with_layout(
-                    &data,
-                    start,
-                    viewport.width,
-                    columns,
-                    self.tab_width,
-                    &self.breakat,
-                );
-                self.request_scroll_at(row, start);
-            } else {
-                self.request_scroll_at(start_row, start);
-            }
+        )
+        .is_some()
+        {
+            return;
         }
+        let back = crate::view::view_start_for_cursor(
+            &data,
+            self.cursor,
+            height,
+            viewport.width,
+            self.tab_width,
+        );
+        let start = if crate::view::screen_position_in_view(
+            &data,
+            self.cursor,
+            back,
+            height,
+            viewport.width,
+            columns,
+            self.tab_width,
+            &self.breakat,
+        )
+        .is_some()
+        {
+            back
+        } else {
+            crate::motion::line_begin(&data, self.cursor)
+        };
+        // The renderer resolves the document row only when it needs to
+        // publish geometry. Native following itself uses only byte offsets.
+        self.scroll_start = Some(start);
+    }
+
+    fn byte_view_start(&self) -> Option<usize> {
+        self.view_anchor_start()
+            .map(|start| self.scroll_start.unwrap_or(start))
+    }
+
+    fn request_byte_scroll(&mut self, start: usize) {
+        self.scroll_start = Some(start);
+        self.scroll_request = None;
+        self.line_motion = false;
     }
 
     /// Native `vis_jumplist(vis, advance)`: save, or move once through the ring
@@ -4243,8 +4246,12 @@ impl Editor {
                 self.jumplist_save();
             }
             Key::Char('z' | 'Z') => self.pending = Pending::Z,
-            Key::PageDown => return self.invoke_native_action(NativeAction::WindowPageDown),
-            Key::PageUp => return self.invoke_native_action(NativeAction::WindowPageUp),
+            Key::PageDown | Key::Ctrl('f') => {
+                return self.invoke_native_action(NativeAction::WindowPageDown);
+            }
+            Key::PageUp | Key::Ctrl('b') => {
+                return self.invoke_native_action(NativeAction::WindowPageUp);
+            }
             Key::ShiftPageDown => {
                 return self.invoke_native_action(NativeAction::WindowHalfpageDown);
             }
@@ -4690,7 +4697,7 @@ impl Editor {
             return Ok(EditorAction::Continue);
         }
         if self.operator.is_some() {
-            let data = self.text.to_vec();
+            let data = self.text.shared_bytes();
             let start = self.cursor.min(target);
             let end = self.cursor.max(target);
             let range = if linewise {
@@ -4705,7 +4712,7 @@ impl Editor {
             self.apply_operator(range, linewise)
         } else {
             self.external_marks.clear();
-            let data = self.text.to_vec();
+            let data = self.text.shared_bytes();
             let cursor = target.min(data.len());
             self.selection_set
                 .replace_primary(

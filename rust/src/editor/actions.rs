@@ -2867,6 +2867,17 @@ impl Editor {
     /// the top, center or bottom of the body. Cursor and text are unchanged.
     fn native_window(&mut self, window: NativeWindow) -> Result<EditorAction, EditorError> {
         use NativeWindow as W;
+        if let Some(start) = self.byte_view_start() {
+            let data = self.text.shared_bytes();
+            let breakat = self.breakat.clone();
+            let mut view =
+                crate::view::NativeView::new(&data, start, self.viewport, self.tab_width, &breakat);
+            if view.coordinate(self.cursor).is_some() {
+                view.window(self.cursor, window);
+                self.request_byte_scroll(view.start);
+                return Ok(EditorAction::Continue);
+            }
+        }
         let viewport = self.viewport;
         let data = self.text.shared_bytes();
         let (row, _) = screen_position_with_layout(
@@ -2891,6 +2902,25 @@ impl Editor {
     /// `view_scroll_down`. The native view counts display lines, this port
     /// counts soft-wrapped rows; every rule below mirrors the native one.
     fn native_scroll(&mut self, scroll: NativeScroll) -> Result<EditorAction, EditorError> {
+        if let Some(start) = self.byte_view_start() {
+            let data = self.text.shared_bytes();
+            let breakat = self.breakat.clone();
+            let mut view =
+                crate::view::NativeView::new(&data, start, self.viewport, self.tab_width, &breakat);
+            if view.coordinate(self.cursor).is_some() {
+                let count = match scroll {
+                    NativeScroll::PageUp
+                    | NativeScroll::PageDown
+                    | NativeScroll::HalfPageUp
+                    | NativeScroll::HalfPageDown => 1,
+                    _ => self.combined_count()?.max(1),
+                };
+                let cursor = view.scroll(self.cursor, scroll, count);
+                self.set_primary_cursor(cursor)?;
+                self.request_byte_scroll(view.start);
+                return Ok(EditorAction::Continue);
+            }
+        }
         let viewport = self.viewport;
         let physical_columns = viewport.width.max(1);
         let columns = viewport.wrap_width();
@@ -3038,7 +3068,7 @@ impl Editor {
     /// Move the primary cursor without touching the other selections. Native
     /// `cursor_set` keeps the anchor of a visual selection.
     fn set_primary_cursor(&mut self, cursor: usize) -> Result<(), EditorError> {
-        let data = self.text.to_vec();
+        let data = self.text.shared_bytes();
         let cursor = cursor.min(data.len());
         let selection = Selection {
             anchor: if self.is_visual() {
@@ -3072,7 +3102,35 @@ impl Editor {
         // Native window motions default their count to 0 (`L` measures from
         // the bottom) unless the user supplied one.
         let bottom_count = if explicit { count } else { 0 };
-        let data = self.text.to_vec();
+        let data = self.text.shared_bytes();
+        if let Some(start) = self
+            .byte_view_start()
+            .filter(|_| self.selections().len() == 1)
+        {
+            let breakat = self.breakat.clone();
+            let mut view =
+                crate::view::NativeView::new(&data, start, viewport, self.tab_width, &breakat);
+            if view.coordinate(self.cursor).is_some() {
+                let (target, preferred) = view.motion(
+                    self.cursor,
+                    movement,
+                    count,
+                    bottom_count,
+                    self.preferred_column,
+                );
+                let target = view.follow(target);
+                let targets = vec![Selection {
+                    anchor: if self.is_visual() {
+                        self.anchor
+                    } else {
+                        target
+                    },
+                    cursor: target,
+                }];
+                self.request_byte_scroll(view.start);
+                return self.finish_view_motion(movement, self.cursor, targets, preferred, false);
+            }
+        }
         let physical_columns = viewport.width.max(1);
         let columns = viewport.wrap_width();
         let tab_width = self.tab_width;
@@ -3115,7 +3173,6 @@ impl Editor {
             }
         };
         let origin = self.cursor;
-        let properties = movement.properties();
         let mut targets = Vec::new();
         let mut preferred = self.preferred_column;
         for selection in self.selections().to_vec() {
@@ -3184,11 +3241,25 @@ impl Editor {
                 cursor: target,
             });
         }
+        self.finish_view_motion(movement, origin, targets, preferred, true)
+    }
+
+    fn finish_view_motion(
+        &mut self,
+        movement: NativeMotion,
+        origin: usize,
+        targets: Vec<Selection>,
+        preferred: Option<usize>,
+        line_follow: bool,
+    ) -> Result<EditorAction, EditorError> {
+        let properties = movement.properties();
         self.preferred_column = preferred;
-        if matches!(
-            movement,
-            NativeMotion::ScreenLineDown | NativeMotion::ScreenLineUp
-        ) {
+        if line_follow
+            && matches!(
+                movement,
+                NativeMotion::ScreenLineDown | NativeMotion::ScreenLineUp
+            )
+        {
             // Native `view_screenline_down`: a cursor that reaches the last
             // row of the view scrolls it down by one row.
             self.set_line_motion(true);

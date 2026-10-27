@@ -2485,10 +2485,12 @@ impl Inner {
 
 impl Runtime {
     /// Supply measured frame geometry before emitting redraw callbacks.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_viewport(
         &self,
         window: usize,
         width: usize,
+        text_width: usize,
         height: usize,
         total_height: usize,
         bytes: std::ops::Range<usize>,
@@ -2499,7 +2501,7 @@ impl Runtime {
         let visual = state.windows.entry(window).or_default();
         visual.width = width;
         visual.height = total_height;
-        visual.viewport_width = width;
+        visual.viewport_width = text_width;
         visual.viewport_height = height;
         visual.viewport_bytes = bytes;
         visual.viewport_lines = lines;

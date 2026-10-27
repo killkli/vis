@@ -13,6 +13,7 @@ use crate::style::Style;
 use crate::workspace::WindowDisplay;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcgetwinsize, tcsetattr};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
@@ -41,6 +42,8 @@ pub enum Layout {
 pub struct RenderView<'a> {
     pub id: usize,
     pub data: &'a [u8],
+    /// Optional owner of these exact bytes, for reusing measured coordinates.
+    pub snapshot: Option<&'a Arc<Vec<u8>>>,
     pub cursor: usize,
     pub selections: &'a [crate::selection::Selection],
     pub anchored: &'a [bool],
@@ -86,6 +89,8 @@ pub struct ViewGeometry {
     pub x: usize,
     pub y: usize,
     pub width: usize,
+    /// Text columns after subtracting the line-number sidebar.
+    pub text_width: usize,
     /// Body rows, excluding the status line.
     pub height: usize,
     pub total_height: usize,
@@ -534,6 +539,24 @@ impl Terminal {
         self.escape_since = None;
     }
 
+    /// Decode only input already buffered by the terminal read. Incomplete
+    /// Escape/paste sequences remain buffered; callers can paint before waiting.
+    pub fn take_pending_event(&mut self) -> io::Result<Option<InputEvent>> {
+        if self.decoder.is_escape() {
+            self.escape_since.get_or_insert_with(Instant::now);
+        } else {
+            self.escape_since = None;
+        }
+        let elapsed = self.escape_since.map(|instant| instant.elapsed());
+        let event = self
+            .decoder
+            .next(elapsed.is_some_and(|time| time >= self.escape_delay))?;
+        if event.is_some() {
+            self.escape_since = None;
+        }
+        Ok(event)
+    }
+
     pub fn read_event(&mut self) -> io::Result<InputEvent> {
         if let Some(tty) = &self.tty {
             let size = terminal_size(tty)?;
@@ -543,19 +566,10 @@ impl Terminal {
             }
         }
         loop {
-            if self.decoder.is_escape() {
-                self.escape_since.get_or_insert_with(Instant::now);
-            } else {
-                self.escape_since = None;
-            }
-            let elapsed = self.escape_since.map(|instant| instant.elapsed());
-            if let Some(event) = self
-                .decoder
-                .next(elapsed.is_some_and(|time| time >= self.escape_delay))?
-            {
-                self.escape_since = None;
+            if let Some(event) = self.take_pending_event()? {
                 return Ok(event);
             }
+            let elapsed = self.escape_since.map(|instant| instant.elapsed());
             let delay = elapsed.map_or(REFRESH_DELAY, |elapsed| {
                 self.escape_delay.saturating_sub(elapsed)
             });
@@ -616,6 +630,7 @@ impl Terminal {
             &[RenderView {
                 id: 0,
                 data: &data,
+                snapshot: None,
                 scroll_start: None,
                 line_motion: false,
                 anchor_start: None,
@@ -687,13 +702,15 @@ impl Terminal {
         if let Some(tty) = &self.tty {
             self.size = terminal_size(tty)?;
         }
-        compose_views(
+        compose_views_decorated(
             &mut self.viewports,
             views,
             active_id,
             layout,
             message,
             self.size,
+            &BTreeMap::new(),
+            true,
         )?;
         Ok(self.geometries(views))
     }
@@ -716,6 +733,7 @@ impl Terminal {
                             x: 0,
                             y: 0,
                             width: 0,
+                            text_width: 0,
                             height: 0,
                             total_height: 0,
                             top: 0,
@@ -747,6 +765,7 @@ impl Terminal {
             message,
             self.size,
             decorations,
+            false,
         )?;
         self.output.as_ref().write_all(frame.as_bytes())?;
         self.output.as_ref().flush()?;
@@ -826,7 +845,7 @@ fn terminal_size(tty: &File) -> io::Result<(usize, usize)> {
 ///
 /// A character that is not wide joins the cell before it, and the cell holds
 /// at most six bytes, as the original editor's cell does.
-fn cell_token(data: &[u8], cell: &crate::view::WrappedCell) -> String {
+fn cell_token<'a>(data: &'a [u8], cell: &crate::view::WrappedCell) -> Cow<'a, str> {
     let mut token = display_token(data, cell.pos, cell.column).0;
     if cell.merged_end > 0 {
         let base = crate::view::utf8_length(data[cell.pos]);
@@ -834,7 +853,9 @@ fn cell_token(data: &[u8], cell: &crate::view::WrappedCell) -> String {
             // The cell holds at most six bytes, so the characters that join it
             // are cut short when the cell is full.
             let room = CELL_DATA_LENGTH.saturating_sub(base);
-            token.push_str(&String::from_utf8_lossy(&bytes[..room.min(bytes.len())]));
+            token
+                .to_mut()
+                .push_str(&String::from_utf8_lossy(&bytes[..room.min(bytes.len())]));
         }
     }
     token
@@ -843,18 +864,19 @@ fn cell_token(data: &[u8], cell: &crate::view::WrappedCell) -> String {
 /// The number of bytes a cell holds, as the original editor's cell does.
 const CELL_DATA_LENGTH: usize = 6;
 
-fn display_token(data: &[u8], pos: usize, column: usize) -> (String, usize, usize) {
+fn display_token(data: &[u8], pos: usize, column: usize) -> (Cow<'_, str>, usize, usize) {
     let byte = data[pos];
     if byte == b'\t' {
         let width = 8 - column % 8;
-        return (" ".repeat(width), width, 1);
+        return (" ".repeat(width).into(), width, 1);
     }
     if byte < 32 || byte == 127 {
         return (
             format!(
                 "^{}",
                 char::from(if byte == 127 { b'?' } else { byte + 64 })
-            ),
+            )
+            .into(),
             2,
             1,
         );
@@ -872,16 +894,16 @@ fn display_token(data: &[u8], pos: usize, column: usize) -> (String, usize, usiz
             if c.is_control() {
                 let escaped = format!("\\u{{{:x}}}", c as u32);
                 let width = escaped.len();
-                return (escaped, width, length);
+                return (escaped.into(), width, length);
             }
             let width = motion::codepoint_width(data, pos);
             if width == 0 && column == 0 {
-                return (format!("\u{25cc}{text}"), 1, length);
+                return (format!("\u{25cc}{text}").into(), 1, length);
             }
-            return (text.to_owned(), width, length);
+            return (Cow::Borrowed(text), width, length);
         }
     }
-    (format!("<{byte:02X}>"), 4, 1)
+    (format!("<{byte:02X}>").into(), 4, 1)
 }
 
 fn source_column(data: &[u8], start: usize, end: usize) -> usize {
@@ -1005,6 +1027,43 @@ struct Viewport {
     /// native editor resizes the view when the sidebar width changes, so the
     /// width follows the visible line numbers.
     sidebar_width: usize,
+    source: Option<Arc<Vec<u8>>>,
+    source_unchanged: bool,
+    layout: Option<(usize, usize, usize, Arc<str>)>,
+    line_starts: Vec<(usize, usize)>,
+    line_number: Option<(usize, usize)>,
+    measure_only: bool,
+    visible_layouts: Vec<VisibleLayout>,
+    line_follow: Option<(LayoutKey, usize)>,
+}
+
+/// At most two viewport-sized layouts are retained: sidebar measurement may
+/// ask for the previous width before the final text width is known.
+type LayoutKey = (usize, usize, usize, usize, usize, Arc<str>);
+
+struct VisibleLayout {
+    key: LayoutKey,
+    cells: Arc<[crate::view::WrappedCell]>,
+    end: usize,
+}
+
+fn position_in_cells(
+    data: &[u8],
+    position: usize,
+    rows: usize,
+    cells: &[crate::view::WrappedCell],
+) -> Option<(usize, usize)> {
+    cells
+        .iter()
+        .take_while(|cell| cell.row < rows)
+        .find(|cell| {
+            if position == data.len() {
+                cell.kind == CellKind::Eof
+            } else {
+                cell.pos <= position && position < cell.pos + cell.len
+            }
+        })
+        .map(|cell| (cell.row, cell.column))
 }
 
 #[derive(Clone, Copy)]
@@ -1022,7 +1081,9 @@ struct PanelFrame {
 
 /// Re-exported for compatibility: coordinate requests share the core layout.
 pub use crate::view::screen_position;
-use crate::view::{CellKind, screen_position_with_layout, walk_cells};
+#[cfg(test)]
+use crate::view::screen_position_with_layout;
+use crate::view::{CellKind, screen_position_in_view as cursor_in_view};
 
 /// Zero-based soft-wrapped coordinates for a cursor position.
 #[cfg(test)]
@@ -1036,6 +1097,7 @@ fn wrapped_cursor(
     wrapped_cursor_with_layout(data, cursor, columns, columns, tab_width, breakat)
 }
 
+#[cfg(test)]
 fn wrapped_cursor_with_layout(
     data: &[u8],
     cursor: usize,
@@ -1115,6 +1177,7 @@ fn wrapped_rows_decorated(
 /// The original editor keeps the end of the view as a byte, and a cursor
 /// beyond it leaves the view.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn view_end_byte(
     data: &[u8],
     start: usize,
@@ -1181,17 +1244,7 @@ fn wrapped_rows_decorated_with_layout(
     // view, so a view that begins in the middle of a line shows the line from
     // there.
     let (start, start_row) = match view_start {
-        Some(start) => {
-            let (row, _) = crate::view::screen_position_with_layout(
-                data,
-                start,
-                physical_columns,
-                wrap_columns,
-                tab_width,
-                breakat,
-            );
-            (start, row)
-        }
+        Some(start) => (start, visible.start),
         None => (0, 0),
     };
     crate::view::walk_cells_from_layout(
@@ -1333,6 +1386,7 @@ fn compose_views(
         message,
         size,
         &BTreeMap::new(),
+        false,
     )
 }
 
@@ -1427,6 +1481,7 @@ fn view_regions(
     (regions, separators)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compose_views_decorated(
     viewports: &mut BTreeMap<usize, Viewport>,
     views: &[RenderView<'_>],
@@ -1435,6 +1490,7 @@ fn compose_views_decorated(
     message: &str,
     size: (usize, usize),
     decorations: &BTreeMap<usize, ViewDecorations>,
+    measure_only: bool,
 ) -> io::Result<String> {
     let active_index = views
         .iter()
@@ -1470,18 +1526,24 @@ fn compose_views_decorated(
         let view = &views[index];
         let focused = view.id == active_id;
         let position = view.cursor.min(view.data.len());
+        let viewport = viewports.entry(view.id).or_default();
+        viewport.measure_only = measure_only;
+        viewport.source_unchanged = view
+            .snapshot
+            .zip(viewport.source.as_ref())
+            .is_some_and(|(current, previous)| Arc::ptr_eq(current, previous));
+        viewport.source = view.snapshot.cloned();
+        if !viewport.source_unchanged {
+            viewport.line_number = None;
+        }
         let status = format!(
             " {}{} -- {} -- {}:{}",
             view.mode.name(),
             if view.modified { " [+]" } else { "" },
             view.path.display(),
-            1 + view.data[..position]
-                .iter()
-                .filter(|&&byte| byte == b'\n')
-                .count(),
+            viewport.line_number(view.data, position),
             1 + position - motion::line_begin(view.data, position)
         );
-        let viewport = viewports.entry(view.id).or_default();
         let overlay = OverlayContext {
             native_view: !view.selections.is_empty(),
             cursors: if focused {
@@ -1521,20 +1583,33 @@ fn compose_views_decorated(
         let body = region
             .height
             .saturating_sub(usize::from(view.display.statusbar));
-        let mut start = None;
-        let mut end = 0;
-        walk_cells(view.data, region.width, view.tab_width, |cell| {
-            if cell.row >= viewport.top.saturating_add(body) {
-                return false;
-            }
-            if cell.row >= viewport.top {
-                start.get_or_insert(cell.pos);
-                end = cell.pos + cell.len;
-            }
-            true
+        let start = viewport.view_start.unwrap_or_else(|| {
+            crate::view::row_start_with_breakat(
+                view.data,
+                viewport.top,
+                region.width,
+                view.tab_width,
+                &view.display.breakat,
+            )
+            .unwrap_or(view.cursor.min(view.data.len()))
         });
-        let start = start.unwrap_or(view.cursor.min(view.data.len()));
-        let first_line = 1 + view.data[..start].iter().filter(|&&b| b == b'\n').count();
+        let text_columns = region.width.saturating_sub(viewport.sidebar_width).max(1);
+        let wrap_columns = if view.display.wrapcolumn > 0 {
+            text_columns.min(view.display.wrapcolumn)
+        } else {
+            text_columns
+        };
+        let cells = viewport.visible_cells(
+            view.data,
+            start,
+            body,
+            text_columns,
+            wrap_columns,
+            view.tab_width,
+            &view.display.breakat,
+        );
+        let end = viewport.visible_end(&cells);
+        let first_line = viewport.line_number(view.data, start);
         let last_line = first_line
             + view.data[start..end.max(start)]
                 .iter()
@@ -1546,6 +1621,7 @@ fn compose_views_decorated(
             x: region.x,
             y: region.y,
             width: region.width,
+            text_width: text_columns,
             height: body,
             total_height: region.height,
             top: viewport.top,
@@ -1597,6 +1673,163 @@ fn compose_views_decorated(
 }
 
 impl Viewport {
+    #[allow(clippy::too_many_arguments)]
+    fn visible_cells(
+        &mut self,
+        data: &[u8],
+        start: usize,
+        rows: usize,
+        columns: usize,
+        wrap_columns: usize,
+        tab_width: usize,
+        breakat: &Arc<str>,
+    ) -> Arc<[crate::view::WrappedCell]> {
+        let key = (
+            start,
+            rows,
+            columns,
+            wrap_columns,
+            tab_width,
+            breakat.clone(),
+        );
+        if let Some(layout) = self.visible_layouts.iter().find(|layout| layout.key == key) {
+            return layout.cells.clone();
+        }
+        let mut cells = Vec::new();
+        let mut end = start;
+        crate::view::walk_cells_with_row_end(
+            data,
+            start,
+            0,
+            1,
+            columns,
+            wrap_columns,
+            tab_width,
+            breakat,
+            |cell| {
+                cells.push(cell);
+                cell.row < rows
+            },
+            |row, read_end| {
+                if row < rows {
+                    end = read_end;
+                }
+            },
+        );
+        let cells: Arc<[_]> = cells.into();
+        if self.visible_layouts.len() == 2 {
+            self.visible_layouts.remove(0);
+        }
+        self.visible_layouts.push(VisibleLayout {
+            key,
+            cells: cells.clone(),
+            end,
+        });
+        cells
+    }
+
+    fn visible_end(&self, cells: &Arc<[crate::view::WrappedCell]>) -> usize {
+        self.visible_layouts
+            .iter()
+            .find(|layout| Arc::ptr_eq(&layout.cells, cells))
+            .expect("a retained layout has its read offset")
+            .end
+    }
+
+    /// Native line-number lookup counts from its previous byte position.
+    fn line_number(&mut self, data: &[u8], position: usize) -> usize {
+        let position = position.min(data.len());
+        let (previous, line) = self.line_number.unwrap_or((0, 1));
+        let previous = previous.min(data.len());
+        let line = if previous <= position {
+            line + data[previous..position]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count()
+        } else {
+            line.saturating_sub(
+                data[position..previous]
+                    .iter()
+                    .filter(|&&byte| byte == b'\n')
+                    .count(),
+            )
+        };
+        self.line_number = Some((position, line));
+        line
+    }
+
+    /// Remember logical-line boundaries while answering legacy document-row
+    /// requests. A byte-addressed view does not otherwise need the prefix.
+    fn document_position(
+        &mut self,
+        data: &[u8],
+        position: usize,
+        columns: usize,
+        wrap_columns: usize,
+        tab_width: usize,
+        breakat: &str,
+    ) -> (usize, usize) {
+        if self.line_starts.is_empty() {
+            self.line_starts.push((0, 0));
+        }
+        let index = self
+            .line_starts
+            .partition_point(|(byte, _)| *byte <= position)
+            .saturating_sub(1);
+        let (start, row) = self.line_starts[index];
+        if breakat.is_empty() {
+            if let Some(coordinate) = crate::view::unbroken_position_from(
+                data,
+                position,
+                start,
+                row,
+                columns,
+                wrap_columns,
+                tab_width,
+                |byte, row| {
+                    if byte > self.line_starts.last().unwrap().0 {
+                        self.line_starts.push((byte, row));
+                    }
+                },
+            ) {
+                return coordinate;
+            }
+        }
+        let mut line = 1;
+        let mut coordinate = (0, 0);
+        crate::view::walk_cells_from_layout(
+            data,
+            start,
+            row,
+            line,
+            columns,
+            wrap_columns,
+            tab_width,
+            breakat,
+            |cell| {
+                if cell.line != line {
+                    line = cell.line;
+                    if cell.pos > self.line_starts.last().unwrap().0 {
+                        self.line_starts.push((cell.pos, cell.row));
+                    }
+                }
+                let found = if position == data.len() {
+                    cell.kind == CellKind::Eof
+                } else {
+                    cell.pos <= position && position < cell.pos + cell.len
+                };
+                if found {
+                    coordinate = (
+                        cell.row,
+                        cell.column + if position > cell.pos { cell.width } else { 0 },
+                    );
+                }
+                !found
+            },
+        );
+        coordinate
+    }
+
     #[cfg(test)]
     fn frame(
         &mut self,
@@ -1681,6 +1914,11 @@ impl Viewport {
         anchor_start: Option<usize>,
         anchor: Option<usize>,
     ) -> PanelFrame {
+        if !self.source_unchanged {
+            self.line_number = None;
+            self.visible_layouts.clear();
+            self.line_follow = None;
+        }
         let (columns, rows) = (region.width, region.height);
         let body = rows.saturating_sub(usize::from(display.statusbar));
         // The anchored line is the first visible row of the previous frame,
@@ -1702,7 +1940,164 @@ impl Viewport {
         if let Some(start) = requested_start {
             self.view_start = Some(start);
         }
-        let sidebar = sidebar_columns(data, self.top, body, layout_columns, tab_width, &display);
+        // Restore the tracked byte before following the cursor. Inserting at
+        // the first visible byte can move the mark onto the cursor itself.
+        if requested_start.is_none() && self.view_start == self.view_start_last {
+            if let Some(start) = anchor_start {
+                self.view_start = Some(start);
+            }
+        }
+        // Following changes which source lines are visible. Resolve it before
+        // sizing the sidebar, as native motions update their view before UI draw.
+        let initial_wrap_columns = if display.wrapcolumn > 0 {
+            display.wrapcolumn.min(layout_columns)
+        } else {
+            layout_columns
+        };
+        if line_motion && requested_top.is_none() {
+            // Native `view_line_down` and `view_line_up`: a cursor that
+            // leaves the view scrolls it so the cursor lands on its last
+            // or first row.
+            let key = (
+                cursor,
+                body,
+                layout_columns,
+                initial_wrap_columns,
+                tab_width,
+                display.breakat.clone(),
+            );
+            let back = if let Some((_, back)) = self
+                .line_follow
+                .as_ref()
+                .filter(|(cached, _)| *cached == key)
+            {
+                *back
+            } else {
+                let back = crate::view::view_start_for_line_motion(
+                    data,
+                    cursor,
+                    body,
+                    layout_columns,
+                    initial_wrap_columns,
+                    tab_width,
+                    &display.breakat,
+                );
+                self.line_follow = Some((key, back));
+                back
+            };
+            self.view_start = Some(back);
+        }
+        if !line_motion && requested_top.is_none() {
+            // Native `view_cursors_to`: the view is addressed by a byte, and a
+            // cursor that leaves it moves the start of the view to the cursor
+            // and scrolls back by half a screen.
+            let start = self.view_start.unwrap_or(0);
+            // The end of the view is the byte after the last cell of its
+            // last row, as the original editor keeps it.
+            let cells = self.visible_cells(
+                data,
+                start,
+                body,
+                layout_columns,
+                initial_wrap_columns,
+                tab_width,
+                &display.breakat,
+            );
+            let end = self.visible_end(&cells);
+            if cursor < start || cursor > end {
+                // The start of the view moves to the cursor and the view is
+                // scrolled back.
+                let back = crate::view::view_start_for_cursor(
+                    data,
+                    cursor,
+                    body,
+                    layout_columns,
+                    tab_width,
+                );
+                self.view_start = Some(back);
+                // The cursor is still outside the view, so the start of the
+                // line that holds it is used, as the original editor does.
+                let cells = self.visible_cells(
+                    data,
+                    back,
+                    body,
+                    layout_columns,
+                    initial_wrap_columns,
+                    tab_width,
+                    &display.breakat,
+                );
+                let end = self.visible_end(&cells);
+                if cursor <= back || cursor > end {
+                    let line = crate::motion::line_begin(data, cursor);
+                    self.view_start = Some(line);
+                    let cells = self.visible_cells(
+                        data,
+                        line,
+                        body,
+                        layout_columns,
+                        initial_wrap_columns,
+                        tab_width,
+                        &display.breakat,
+                    );
+                    if cursor <= line || cursor > self.visible_end(&cells) {
+                        self.view_start = Some(cursor);
+                    }
+                }
+            }
+        }
+        if !line_motion
+            && !self.source_unchanged
+            && requested_top.is_none()
+            && requested_start.is_none()
+            && self.view_start == Some(cursor)
+        {
+            let begin = crate::motion::line_begin(data, cursor);
+            let cells = self.visible_cells(
+                data,
+                begin,
+                body,
+                layout_columns,
+                initial_wrap_columns,
+                tab_width,
+                &display.breakat,
+            );
+            // Native view_cursors_to first retries the logical line; a
+            // cursor beyond that screen must remain the byte start.
+            if cursor <= self.visible_end(&cells) {
+                self.view_start = Some(begin);
+            }
+        }
+        let numbering_start = self
+            .view_start
+            .or_else(|| requested_top.is_none().then_some(0))
+            .map(|start| (start, self.line_number(data, start)));
+        let sidebar_cells = numbering_start
+            .filter(|_| display.numbers || display.relativenumbers)
+            .map(|(start, _)| {
+                self.visible_cells(
+                    data,
+                    start,
+                    body,
+                    layout_columns,
+                    if display.wrapcolumn > 0 {
+                        display.wrapcolumn.min(layout_columns)
+                    } else {
+                        layout_columns
+                    },
+                    tab_width,
+                    &display.breakat,
+                )
+            });
+        let sidebar = sidebar_columns(
+            data,
+            self.top,
+            numbering_start,
+            body,
+            layout_columns,
+            tab_width,
+            &display,
+            sidebar_cells.as_deref(),
+        );
         self.sidebar_width = sidebar;
         let text_columns = columns.saturating_sub(sidebar).max(1);
         // Native `view_max_text_width`: the text wraps at the smaller of the
@@ -1712,40 +2107,82 @@ impl Viewport {
         } else {
             text_columns
         };
-        // The original editor keeps the start of its view on a text mark, so
-        // the view follows the text when the text changes above it. The start
-        // is restored from the mark only when it did not change, so a scroll
-        // is not undone.
-        // The original editor keeps the start of its view on a text mark. A
-        // scroll sets the mark to the new start, and the start is restored
-        // from the mark only when it did not change, so the view follows the
-        // text when the text changes above it.
-        let anchor = anchor_start.filter(|_| self.view_start == self.view_start_last);
-        // The view is addressed by a byte, and the row of its first row
-        // follows from that byte, so the two never disagree.
-        if let Some(start) = self.view_start {
-            let (row, _) = crate::view::screen_position_with_layout(
-                data,
-                start,
-                text_columns,
-                wrap_columns,
-                tab_width,
-                &display.breakat,
-            );
-            self.top = row;
+        // The original editor reports the line of the cursor's position, not
+        // the line of its display row, so a view that begins in the middle of
+        // a long line still reports the right line.
+        let cursor_line = self.line_number(data, cursor);
+        if let Some(top) = requested_top {
+            // Scroll actions place the cursor where the user will see it; do
+            // not pull the view back, only clamp to the last row that exists.
+            self.top = if requested_start.is_some_and(|start| start <= data.len()) {
+                top
+            } else {
+                top.min(crate::view::last_row_with_layout(
+                    data,
+                    text_columns,
+                    wrap_columns,
+                    tab_width,
+                    &display.breakat,
+                ))
+            };
         }
-        let (cursor_row, cursor_column) = wrapped_cursor_with_layout(
+        let layout = (
+            text_columns,
+            wrap_columns,
+            tab_width,
+            display.breakat.clone(),
+        );
+        let layout_changed = !self.source_unchanged || self.layout.as_ref() != Some(&layout);
+        if layout_changed {
+            self.line_starts.clear();
+        }
+        if layout_changed || self.view_start != self.view_start_last {
+            if let Some(start) = self.view_start {
+                self.top = self
+                    .document_position(
+                        data,
+                        start,
+                        text_columns,
+                        wrap_columns,
+                        tab_width,
+                        &display.breakat,
+                    )
+                    .0;
+            }
+        }
+        self.layout = Some(layout);
+        let cells = self.visible_cells(
             data,
-            cursor,
+            self.view_start.unwrap_or(0),
+            body,
             text_columns,
             wrap_columns,
             tab_width,
             &display.breakat,
         );
-        // The original editor reports the line of the cursor's position, not
-        // the line of its display row, so a view that begins in the middle of
-        // a long line still reports the right line.
-        let cursor_line = crate::view::line_number_at_byte(data, cursor);
+        if self.measure_only {
+            return PanelFrame {
+                text: String::new(),
+                cursor: (0, 0),
+            };
+        }
+        // Coordinates within a byte-addressed view come from that view's
+        // layout, including when it starts partway through a logical line.
+        let (cursor_row, cursor_column) = position_in_cells(data, cursor, body, &cells)
+            .map(|(row, column)| (row + self.top, column))
+            .unwrap_or((
+                self.top
+                    + if cursor >= self.view_start.unwrap_or(0) {
+                        body.saturating_sub(1)
+                    } else {
+                        0
+                    },
+                0,
+            ));
+        let numbering_start = self
+            .view_start
+            .or_else(|| requested_top.is_none().then_some(0))
+            .map(|start| (start, self.line_number(data, start)));
         let numbers = line_numbers(
             data,
             self.top,
@@ -1756,105 +2193,9 @@ impl Viewport {
             &display,
             cursor_line,
             sidebar,
+            numbering_start,
+            Some(&cells),
         );
-        if let Some(top) = requested_top {
-            // Scroll actions place the cursor where the user will see it; do
-            // not pull the view back, only clamp to the last row that exists.
-            self.top = top.min(crate::view::last_row_with_layout(
-                data,
-                text_columns,
-                wrap_columns,
-                tab_width,
-                &display.breakat,
-            ));
-        } else {
-            // Native `view_cursors_to`: the view is addressed by a byte, and a
-            // cursor that leaves it moves the start of the view to the cursor
-            // and scrolls back by half a screen.
-            let start = self.view_start.unwrap_or(0);
-            // The end of the view is the byte after the last cell of its
-            // last row, as the original editor keeps it.
-            let end = view_end_byte(
-                data,
-                start,
-                body,
-                text_columns,
-                wrap_columns,
-                tab_width,
-                &display.breakat,
-            );
-            if line_motion {
-                // Native `view_line_down` and `view_line_up`: a cursor that
-                // leaves the view scrolls it so the cursor lands on its last
-                // or first row.
-                let back = crate::view::view_start_for_line_motion(
-                    data,
-                    cursor,
-                    body,
-                    text_columns,
-                    wrap_columns,
-                    tab_width,
-                    &display.breakat,
-                );
-                self.view_start = Some(back);
-                let (row, _) = crate::view::screen_position_with_layout(
-                    data,
-                    back,
-                    text_columns,
-                    wrap_columns,
-                    tab_width,
-                    &display.breakat,
-                );
-                self.top = row;
-            } else if cursor < start || cursor > end {
-                // The start of the view moves to the cursor and the view is
-                // scrolled back.
-                let back =
-                    crate::view::view_start_for_cursor(data, cursor, body, text_columns, tab_width);
-                self.view_start = Some(back);
-                // The cursor is still outside the view, so the start of the
-                // line that holds it is used, as the original editor does.
-                let end = view_end_byte(
-                    data,
-                    back,
-                    body,
-                    text_columns,
-                    wrap_columns,
-                    tab_width,
-                    &display.breakat,
-                );
-                if cursor <= back || cursor > end {
-                    let line = crate::motion::line_begin(data, cursor);
-                    self.view_start = Some(line);
-                }
-                let start = self.view_start.unwrap_or(0);
-                let (row, _) = crate::view::screen_position_with_layout(
-                    data,
-                    start,
-                    text_columns,
-                    wrap_columns,
-                    tab_width,
-                    &display.breakat,
-                );
-                self.top = row;
-            }
-            // The view follows the text when the text changed above it and
-            // the view did not move.
-            if let Some(anchor) = anchor {
-                if self.view_start == self.view_start_last {
-                    self.view_start = Some(anchor);
-                    let (row, _) = crate::view::screen_position_with_layout(
-                        data,
-                        anchor,
-                        text_columns,
-                        wrap_columns,
-                        tab_width,
-                        &display.breakat,
-                    );
-                    self.top = row;
-                }
-            }
-        }
         let mut fallback = ViewDecorations::default();
         if decorations.is_none() && overlay.native_view && prompt.is_none() {
             fallback.operations.push(DrawOperation::CoreOverlays {
@@ -1890,6 +2231,7 @@ impl Viewport {
                 display.showspaces,
                 display.showtabs,
                 display.shownewlines,
+                Some(&cells),
             );
             return PanelFrame {
                 text,
@@ -1996,8 +2338,8 @@ impl Viewport {
 }
 
 #[derive(Clone)]
-struct PaintCell {
-    text: String,
+struct PaintCell<'a> {
+    text: Cow<'a, str>,
     width: usize,
     style: Style,
     source: Option<usize>,
@@ -2013,11 +2355,11 @@ fn paint_text(cells: &mut [PaintCell], mut column: usize, text: &[u8], style: St
         if width == 0 || column + width > cells.len() {
             break;
         }
-        cells[column].text = token;
+        cells[column].text = Cow::Owned(token.into_owned());
         cells[column].width = width;
         cells[column].style = style;
         for next in 1..width {
-            cells[column + next].text.clear();
+            cells[column + next].text = "".into();
             cells[column + next].width = 0;
             cells[column + next].style = style;
         }
@@ -2105,6 +2447,7 @@ fn ordered_panel(
     show_spaces: bool,
     show_tabs: bool,
     show_newlines: bool,
+    cells: Option<&[crate::view::WrappedCell]>,
 ) -> String {
     let width = region.width;
     let height = region.height;
@@ -2140,100 +2483,111 @@ fn ordered_panel(
     // are the rows of the view.
     let walk_start = view_start.unwrap_or(0);
     let walk_row = 0;
-    crate::view::walk_cells_from_layout(
-        data,
-        walk_start,
-        walk_row,
-        1,
-        text_width,
-        wrap_width,
-        tab_width,
-        &display.breakat,
-        |cell| {
-            let file_bytes = if last_source == Some(cell.pos) {
-                0
-            } else {
-                cell.len
-            };
-            last_source = Some(cell.pos);
-            if cell.row >= top {
-                visible_start.get_or_insert(source_position);
-            }
-            source_position += file_bytes;
-            if matches!(cell.kind, CellKind::Eof) {
-                eof_row = Some(cell.row);
-            } else if cell.kind != CellKind::Newline || cell.len > 0 {
-                // The last line that has content. The original editor draws
-                // the end-of-file symbol on the rows after it.
-                last_content_row = Some(cell.row);
-            }
-            if cell.row >= body_height {
-                return false;
-            }
-            let row = cell.row;
-            if cell.width == 0 {
-                let mut column = cell.column.min(width);
-                while column > 0 {
-                    column -= 1;
-                    if body[row * text_width + column].width > 0 {
-                        body[row * text_width + column]
-                            .text
-                            .push_str(&display_token(data, cell.pos, cell.column).0);
-                        body[row * text_width + column].file_bytes += file_bytes;
-                        break;
-                    }
+    let mut visit = |cell: crate::view::WrappedCell| {
+        let file_bytes = if last_source == Some(cell.pos) {
+            0
+        } else {
+            cell.len
+        };
+        last_source = Some(cell.pos);
+        if cell.row >= top {
+            visible_start.get_or_insert(source_position);
+        }
+        source_position += file_bytes;
+        if matches!(cell.kind, CellKind::Eof) {
+            eof_row = Some(cell.row);
+        } else if cell.kind != CellKind::Newline || cell.len > 0 {
+            // The last line that has content. The original editor draws
+            // the end-of-file symbol on the rows after it.
+            last_content_row = Some(cell.row);
+        }
+        if cell.row >= body_height {
+            return false;
+        }
+        let row = cell.row;
+        if cell.width == 0 {
+            let mut column = cell.column.min(width);
+            while column > 0 {
+                column -= 1;
+                if body[row * text_width + column].width > 0 {
+                    body[row * text_width + column]
+                        .text
+                        .to_mut()
+                        .push_str(&display_token(data, cell.pos, cell.column).0);
+                    body[row * text_width + column].file_bytes += file_bytes;
+                    break;
                 }
-                return true;
             }
-            let token = match cell.kind {
-                CellKind::Source => cell_token(data, &cell),
-                CellKind::Replacement => "?".into(),
-                CellKind::Space => {
-                    if show_spaces {
-                        "·".into()
-                    } else {
-                        " ".into()
-                    }
+            return true;
+        }
+        let token = match cell.kind {
+            CellKind::Source => cell_token(data, &cell),
+            CellKind::Replacement => "?".into(),
+            CellKind::Space => {
+                if show_spaces {
+                    "·".into()
+                } else {
+                    " ".into()
                 }
-                CellKind::Tab => {
-                    if show_tabs {
-                        "›".into()
-                    } else {
-                        " ".into()
-                    }
-                }
-                CellKind::TabFill => " ".into(),
-                CellKind::Newline => {
-                    if show_newlines {
-                        "↵".into()
-                    } else {
-                        " ".into()
-                    }
-                }
-                CellKind::Eof => " ".into(),
-            };
-            let index = row * text_width + cell.column;
-            body[index].text = token;
-            body[index].width = cell.width;
-            body[index].source = Some(cell.pos);
-            if data
-                .get(cell.pos)
-                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
-            {
-                body[index].style = base.merge(whitespace);
             }
-            body[index].file_bytes = file_bytes;
-            body[index].in_line = !matches!(cell.kind, CellKind::Eof);
-            for offset in 1..cell.width {
-                body[index + offset].text.clear();
-                body[index + offset].width = 0;
-                body[index + offset].source = Some(cell.pos);
-                body[index + offset].style = body[index].style;
-                body[index + offset].in_line = true;
+            CellKind::Tab => {
+                if show_tabs {
+                    "›".into()
+                } else {
+                    " ".into()
+                }
             }
-            true
-        },
-    );
+            CellKind::TabFill => " ".into(),
+            CellKind::Newline => {
+                if show_newlines {
+                    "↵".into()
+                } else {
+                    " ".into()
+                }
+            }
+            CellKind::Eof => " ".into(),
+        };
+        let index = row * text_width + cell.column;
+        body[index].text = token;
+        body[index].width = cell.width;
+        body[index].source = Some(cell.pos);
+        if data
+            .get(cell.pos)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+        {
+            body[index].style = base.merge(whitespace);
+        }
+        body[index].file_bytes = file_bytes;
+        body[index].in_line = !matches!(cell.kind, CellKind::Eof);
+        for offset in 1..cell.width {
+            body[index + offset].text = "".into();
+            body[index + offset].width = 0;
+            body[index + offset].source = Some(cell.pos);
+            body[index + offset].style = body[index].style;
+            body[index + offset].in_line = true;
+        }
+        true
+    };
+    if let Some(cells) = cells {
+        for cell in cells {
+            if !visit(*cell) {
+                break;
+            }
+        }
+    } else {
+        crate::view::walk_cells_from_layout(
+            data,
+            walk_start,
+            walk_row,
+            1,
+            text_width,
+            wrap_width,
+            tab_width,
+            &display.breakat,
+            visit,
+        );
+    }
+
     if display.showeof {
         if let Some(eof) = last_content_row.or(eof_row) {
             for row in 0..body_height {
@@ -2284,17 +2638,25 @@ fn ordered_panel(
                     .filter_map(|cell| cell.source)
                     .max()
                     .map_or(start, |position| motion::char_next(data, position));
+                let locate = |position| {
+                    if let Some(cells) = cells {
+                        position_in_cells(data, position, body_height, cells)
+                    } else {
+                        cursor_in_view(
+                            data,
+                            position,
+                            walk_start,
+                            body_height,
+                            text_width,
+                            wrap_width,
+                            tab_width,
+                            &display.breakat,
+                        )
+                    }
+                };
                 for (position, is_primary) in &overlay.cursors {
-                    let (row, column) = wrapped_cursor_with_layout(
-                        data,
-                        *position,
-                        text_width,
-                        wrap_width,
-                        tab_width,
-                        &display.breakat,
-                    );
-                    if row >= top && row < top + body_height && column < text_width {
-                        let cell = &mut body[(row - top) * text_width + column];
+                    if let Some((row, column)) = locate(*position) {
+                        let cell = &mut body[row * text_width + column];
                         cell.style = cell
                             .style
                             .merge(if *is_primary { *primary } else { *cursor });
@@ -2304,16 +2666,8 @@ fn ordered_panel(
                             motion::bracket_match_range(data, *position, start..end)
                                 .filter(|matching| matching != position)
                         {
-                            let (row, column) = wrapped_cursor_with_layout(
-                                data,
-                                matching,
-                                text_width,
-                                wrap_width,
-                                tab_width,
-                                &display.breakat,
-                            );
-                            if row >= top && row < top + body_height && column < text_width {
-                                let cell = &mut body[(row - top) * text_width + column];
+                            if let Some((row, column)) = locate(matching) {
+                                let cell = &mut body[row * text_width + column];
                                 cell.style = cell.style.merge(*selection);
                             }
                         }
@@ -2399,16 +2753,64 @@ impl LineNumbers {
     }
 }
 
+/// Line numbers need only a byte count in the prefix, not its display layout.
+#[allow(clippy::too_many_arguments)]
+fn visible_line_numbers(
+    data: &[u8],
+    start: usize,
+    first_line: usize,
+    rows: usize,
+    columns: usize,
+    wrap_columns: usize,
+    tab_width: usize,
+    breakat: &str,
+    cells: Option<&[crate::view::WrappedCell]>,
+) -> Vec<usize> {
+    let mut numbers = Vec::new();
+    if let Some(cells) = cells {
+        for cell in cells.iter().take_while(|cell| cell.row < rows) {
+            if numbers.len() <= cell.row {
+                numbers.push(first_line + cell.line - 1);
+            }
+        }
+        return numbers;
+    }
+
+    crate::view::walk_cells_from_layout(
+        data,
+        start,
+        0,
+        first_line,
+        columns,
+        wrap_columns,
+        tab_width,
+        breakat,
+        |cell| {
+            if cell.row >= rows {
+                return false;
+            }
+            if numbers.len() <= cell.row {
+                numbers.push(cell.line);
+            }
+            true
+        },
+    );
+    numbers
+}
+
 /// The width of the native line number sidebar. The native sidebar is as wide
 /// as the last visible line number plus a separating space, and never
 /// narrower than the `numberwidth` option.
+#[allow(clippy::too_many_arguments)]
 fn sidebar_columns(
     data: &[u8],
     top: usize,
+    start: Option<(usize, usize)>,
     body: usize,
     columns: usize,
     tab_width: usize,
     display: &WindowDisplay,
+    cells: Option<&[crate::view::WrappedCell]>,
 ) -> usize {
     if !display.numbers && !display.relativenumbers {
         return 0;
@@ -2420,6 +2822,21 @@ fn sidebar_columns(
     };
     let last = if body == 0 {
         1
+    } else if let Some((start, first_line)) = start {
+        visible_line_numbers(
+            data,
+            start,
+            first_line,
+            body,
+            columns,
+            wrap_columns,
+            tab_width,
+            &display.breakat,
+            cells,
+        )
+        .last()
+        .copied()
+        .unwrap_or(1)
     } else {
         crate::view::line_number_at_row_with_layout(
             data,
@@ -2448,18 +2865,34 @@ fn line_numbers(
     display: &WindowDisplay,
     cursor_line: usize,
     width: usize,
+    start: Option<(usize, usize)>,
+    cells: Option<&[crate::view::WrappedCell]>,
 ) -> LineNumbers {
     if width == 0 {
         return LineNumbers::none();
     }
-    let lines = crate::view::row_line_numbers_with_layout(
-        data,
-        top..top + body,
-        physical_columns,
-        wrap_columns,
-        tab_width,
-        &display.breakat,
-    );
+    let lines = if let Some((start, first_line)) = start {
+        visible_line_numbers(
+            data,
+            start,
+            first_line,
+            body,
+            physical_columns,
+            wrap_columns,
+            tab_width,
+            &display.breakat,
+            cells,
+        )
+    } else {
+        crate::view::row_line_numbers_with_layout(
+            data,
+            top..top + body,
+            physical_columns,
+            wrap_columns,
+            tab_width,
+            &display.breakat,
+        )
+    };
     let numbers = lines
         .into_iter()
         .map(|line| {
@@ -2478,9 +2911,9 @@ fn line_numbers(
 }
 
 /// Copy the body rows into the window grid, leaving the sidebar columns.
-fn copy_body(
-    ui: &mut [PaintCell],
-    body: &[PaintCell],
+fn copy_body<'a>(
+    ui: &mut [PaintCell<'a>],
+    body: &[PaintCell<'a>],
     width: usize,
     text_width: usize,
     sidebar: usize,
@@ -2524,7 +2957,7 @@ fn draw_sidebar(
         }
         for (offset, character) in text.chars().enumerate() {
             let cell = &mut ui[row * width + padding + offset];
-            cell.text = character.to_string();
+            cell.text = character.to_string().into();
             cell.width = 1;
             cell.style = style;
         }
@@ -2814,6 +3247,7 @@ mod tests {
         RenderView {
             id,
             data,
+            snapshot: None,
             scroll_start: None,
             line_motion: false,
             anchor_start: None,
@@ -2832,6 +3266,276 @@ mod tests {
             wrapcolumn: 0,
             anchor: None,
             prompt: None,
+        }
+    }
+
+    #[test]
+    fn visible_cells_are_shared_until_bytes_or_layout_change() {
+        let mut data = Arc::new("ab\t界a\u{301}\nlong text here\n".repeat(100).into_bytes());
+        let mut ports = BTreeMap::new();
+        let mut previous: Option<Arc<[crate::view::WrappedCell]>> = None;
+        for step in 0..7 {
+            if step == 2 {
+                Arc::make_mut(&mut data)[0] = b'X';
+            }
+            let mut descriptor = view(1, &data, step.min(2), &[]);
+            descriptor.snapshot = Some(&data);
+            descriptor.tab_width = if step >= 4 { 4 } else { 8 };
+            if step >= 5 {
+                descriptor.display.breakat = " ".into();
+            }
+            if step >= 6 {
+                descriptor.display.wrapcolumn = 3;
+            }
+            let width = if step >= 3 { 10 } else { 8 };
+            compose_views(
+                &mut ports,
+                &[descriptor],
+                1,
+                Layout::Horizontal,
+                "",
+                (width, 4),
+            )
+            .unwrap();
+            let viewport = &ports[&1];
+            assert!(viewport.visible_layouts.len() <= 2);
+            let cells = viewport.visible_layouts.last().unwrap().cells.clone();
+            if let Some(previous) = previous {
+                assert_eq!(
+                    Arc::ptr_eq(&previous, &cells),
+                    step == 1,
+                    "unexpected cache reuse at step {step}"
+                );
+            }
+            previous = Some(cells);
+        }
+    }
+
+    #[test]
+    fn retained_cells_paint_identically_to_the_streamed_cells() {
+        let overlay = OverlayContext {
+            native_view: true,
+            match_brackets: true,
+            cursors: vec![(0, true), (3, false)],
+        };
+        let decorations = ViewDecorations {
+            operations: vec![
+                DrawOperation::CoreOverlays {
+                    selection: Style::parse("reverse"),
+                    cursor: Style::parse("bold"),
+                    primary: Style::parse("blink"),
+                    eof: Style::parse("fore:red"),
+                },
+                DrawOperation::BodyCopy,
+            ],
+            ..ViewDecorations::default()
+        };
+        for data in [
+            b"(a)\tb\n".as_slice(),
+            "界a\u{301}b\n\n".as_bytes(),
+            b"a\x01\xff\n",
+            b"",
+        ] {
+            for width in 1..=10 {
+                for breakat in ["", " "] {
+                    let mut viewport = Viewport::default();
+                    let breakat: Arc<str> = breakat.into();
+                    let cells = viewport.visible_cells(data, 0, 3, width, width, 4, &breakat);
+                    let display = WindowDisplay {
+                        breakat,
+                        ..WindowDisplay::default()
+                    };
+                    let draw = |cells| {
+                        ordered_panel(
+                            data,
+                            0,
+                            Some(0),
+                            &[0..1],
+                            Region {
+                                x: 0,
+                                y: 0,
+                                width,
+                                height: 4,
+                            },
+                            4,
+                            display.clone(),
+                            &decorations,
+                            &overlay,
+                            &LineNumbers::none(),
+                            width,
+                            false,
+                            false,
+                            false,
+                            cells,
+                        )
+                    };
+                    assert_eq!(
+                        draw(Some(&cells)),
+                        draw(None),
+                        "data={data:?} width={width}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_measurement_matches_painting_without_building_a_body() {
+        let data = Arc::new(b"prefix\n0123456789abcdefghij\nlast line\n".to_vec());
+        let mut measured = BTreeMap::new();
+        let mut painted = BTreeMap::new();
+        for cursor in [0, 12, 30, 32, 2, data.len()] {
+            let mut descriptor = view(1, &data, cursor, &[]);
+            descriptor.snapshot = Some(&data);
+            descriptor.display.numbers = true;
+            let views = [descriptor];
+            for (ports, measure) in [(&mut measured, true), (&mut painted, false)] {
+                compose_views_decorated(
+                    ports,
+                    &views,
+                    1,
+                    Layout::Horizontal,
+                    "",
+                    (8, 4),
+                    &BTreeMap::new(),
+                    measure,
+                )
+                .unwrap();
+            }
+            assert_eq!(measured[&1].geometry, painted[&1].geometry);
+            assert_eq!(measured[&1].view_start, painted[&1].view_start);
+        }
+    }
+
+    #[test]
+    fn following_sizes_the_sidebar_from_the_new_visible_lines() {
+        let mut bytes = vec![b'a'; 5000];
+        bytes.extend_from_slice(b"\n");
+        bytes.extend_from_slice(&b"line\n".repeat(150));
+        let data = Arc::new(bytes);
+        let mut ports = BTreeMap::new();
+        for (cursor, expected_width) in [(data.len(), 76), (0, 78)] {
+            let mut descriptor = view(1, &data, cursor, &[]);
+            descriptor.snapshot = Some(&data);
+            descriptor.display.numbers = true;
+            compose_views(
+                &mut ports,
+                &[descriptor],
+                1,
+                Layout::Horizontal,
+                "",
+                (80, 24),
+            )
+            .unwrap();
+            assert_eq!(
+                ports[&1].geometry.as_ref().unwrap().text_width,
+                expected_width
+            );
+        }
+    }
+
+    #[test]
+    fn inserting_at_the_first_visible_byte_keeps_inserted_text_visible() {
+        let mut ports = BTreeMap::new();
+        let original = Arc::new(b"original\n".to_vec());
+        let mut descriptor = view(1, &original, 0, &[]);
+        descriptor.snapshot = Some(&original);
+        compose_views(
+            &mut ports,
+            &[descriptor],
+            1,
+            Layout::Horizontal,
+            "",
+            (80, 24),
+        )
+        .unwrap();
+        let edited = Arc::new(b"unsavedoriginal\n".to_vec());
+        let mut descriptor = view(1, &edited, 7, &[]);
+        descriptor.snapshot = Some(&edited);
+        descriptor.anchor_start = Some(7);
+        compose_views(
+            &mut ports,
+            &[descriptor],
+            1,
+            Layout::Horizontal,
+            "",
+            (80, 24),
+        )
+        .unwrap();
+        assert_eq!(ports[&1].view_start, Some(0));
+    }
+
+    #[test]
+    fn an_unchanged_cursor_at_view_start_preserves_a_byte_scroll() {
+        let data = Arc::new(b"aa,bbbb,cc,dddd,12345,\tXYZ\n".repeat(40));
+        let mut ports = BTreeMap::new();
+        for scroll in [Some(1041), None] {
+            let mut descriptor = view(1, &data, 1041, &[]);
+            descriptor.snapshot = Some(&data);
+            descriptor.scroll_start = scroll;
+            descriptor.anchor_start = Some(1041);
+            descriptor.display.wrapcolumn = 7;
+            descriptor.display.breakat = Arc::from(",");
+            compose_views(
+                &mut ports,
+                &[descriptor],
+                1,
+                Layout::Horizontal,
+                "",
+                (12, 5),
+            )
+            .unwrap();
+            assert_eq!(ports[&1].view_start, Some(1041));
+        }
+    }
+
+    #[test]
+    fn cached_line_boundaries_preserve_document_coordinates() {
+        let data = "hello world\n\t界a\u{301}bc\n\nlong word here\n".as_bytes();
+        for breakat in ["", " "] {
+            let mut viewport = Viewport::default();
+            for position in (0..=data.len()).rev().chain(0..=data.len()) {
+                assert_eq!(
+                    viewport.document_position(data, position, 5, 5, 4, breakat),
+                    crate::view::screen_position_with_layout(data, position, 5, 5, 4, breakat),
+                    "position={position} breakat={breakat:?}",
+                );
+            }
+            assert!(viewport.line_starts.len() > 1);
+        }
+    }
+
+    #[test]
+    fn byte_view_geometry_and_cursor_follow_content_and_width_changes() {
+        let mut data = Arc::new(b"prefix\n0123456789abcdefghij\nend".to_vec());
+        let mut viewports = BTreeMap::new();
+        for (width, replacement) in [(5, None), (5, None), (8, None), (8, Some(b'\n'))] {
+            if let Some(byte) = replacement {
+                Arc::make_mut(&mut data)[3] = byte;
+            }
+            let mut descriptor = view(1, &data, 13, &[]);
+            descriptor.snapshot = Some(&data);
+            descriptor.scroll_start = Some(10);
+            compose_views(
+                &mut viewports,
+                &[descriptor],
+                1,
+                Layout::Horizontal,
+                "",
+                (width, 4),
+            )
+            .unwrap();
+            let viewport = &viewports[&1];
+            let geometry = viewport.geometry.as_ref().unwrap();
+            assert_eq!(geometry.bytes.start, 10);
+            assert_eq!(
+                geometry.top,
+                crate::view::screen_position(&data, 10, width, 8).0
+            );
+            assert_eq!(
+                geometry.bytes.end,
+                view_end_byte(&data, 10, 3, width, width, 8, "")
+            );
         }
     }
 
@@ -2966,6 +3670,7 @@ mod tests {
             "",
             (8, 3),
             &BTreeMap::from([(1, style)]),
+            false,
         )
         .unwrap();
         assert!(frame.contains("\x1b[1;31;40mb"));
@@ -2985,6 +3690,7 @@ mod tests {
                     ..ViewDecorations::default()
                 },
             )]),
+            false,
         )
         .unwrap();
         assert!(message_frame.contains("Left"));
@@ -3081,6 +3787,7 @@ mod tests {
             "",
             (6, 2),
             &BTreeMap::from([(1, styles)]),
+            false,
         )
         .unwrap();
         assert!(frame.contains("\x1b[33;40mL"), "{frame:?}");
@@ -3171,6 +3878,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert!(frame.contains("\x1b[2;4;32;41ma"), "{frame:?}");
         assert!(frame.contains("\x1b[33;47mL"), "{frame:?}");
@@ -3196,6 +3904,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert!(
             frame.contains("\x1b[2;1H\x1b[0m\x1b[36;47mZ   "),
@@ -3236,6 +3945,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert!(
             tab.contains("\x1b[1;31;40m \x1b[0m\x1b[37;40m      Z"),
@@ -3256,6 +3966,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert!(
             control.contains("\x1b[1;31;40m^A\x1b[0m\x1b[37;40mZ"),
@@ -3280,6 +3991,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert!(!eof.contains("31;40m"), "{eof:?}");
     }
@@ -3313,6 +4025,7 @@ mod tests {
             false,
             false,
             false,
+            None,
         );
         assert!(
             frame.contains("\x1b[3;31;47m       \x1b[0m\x1b[1;34;47mZ"),

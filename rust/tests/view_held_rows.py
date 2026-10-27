@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "rust" / "tests"))
 from terminal_smoke import Session  # noqa: E402
+from example_latency import settle  # noqa: E402
 import content_compare  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,15 +36,11 @@ def run(binary: str, path: str, keys: str, rows: int, columns: int):
     session = Session(binary, path)
     try:
         session.ready()
-        time.sleep(0.5)
+        settle(session, time.monotonic())
         for key in keys:
+            started = time.monotonic()
             session.send(key.encode())
-            time.sleep(0.1)
-        # The native editor scrolls one row at a time, so it needs time to
-        # settle before its view is the one the port shows.
-        time.sleep(4.0)
-        for _ in range(40):
-            session.read(0.05)
+            settle(session, started)
         return content_compare.screen_lines(bytes(session.output), rows, columns)
     finally:
         session.close()
@@ -103,30 +100,24 @@ def main() -> int:
     os.environ["LUA_PATH"] = (
         f"{ROOT}/lua/?.lua;{ROOT}/lua/?/init.lua;;"
     )
-    session = Session(args.native, args.path)
-    try:
-        session.ready()
-        time.sleep(0.5)
-        for key in args.keys:
-            session.send(key.encode())
-            time.sleep(0.1)
-        time.sleep(4.0)
-        for _ in range(40):
-            session.read(0.05)
-    finally:
-        session.close()
+    run(args.native, args.path, args.keys, args.rows, args.columns)
 
     held = held_rows(trace)
     port = run(args.port, args.path, args.keys, args.rows, args.columns)
     if not held:
         print("the native editor wrote no trace; run tools/trace_native_view.sh")
         return 1
+    # The trace holds the text body; the terminal screen also includes the
+    # optional line-number sidebar. Its width follows the final native view.
+    headers = re.findall(r"DRAW start=\d+ end=\d+ w=(\d+) h=(\d+)", trace.read_text(errors="replace"))
+    body_width = next(int(width) for width, height in reversed(headers) if int(height) == len(held))
+    sidebar = max(0, args.columns - body_width)
     same = 0
     for index in sorted(held):
         if index >= len(port):
             break
         native = held[index]
-        ours = port[index]
+        ours = port[index][sidebar:]
         if native.rstrip() == ours.rstrip():
             same += 1
         else:

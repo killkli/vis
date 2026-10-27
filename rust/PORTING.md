@@ -14,14 +14,16 @@ remain the behavioral reference throughout migration.
   read snapshots also share bytes; conflict checks and saves stream through pieces
   instead of allocating another complete document buffer.
 * Core modules use the standard library only. `unsafe_code = "forbid"` is enforced
-  by Cargo and the crate. The optional Unix terminal feature uses `rustix` for
-  safe OS interfaces, `signal-hook` for deferred signal handling, and a narrow
-  `nix` signal-mask interface for foreground job control; their low-level
-  implementations remain outside this crate's unsafe prohibition. No original C
-  editor implementation is linked into the Rust executable. The optional `lua`
-  feature uses safe mlua bindings to a vendored Lua VM; third-party native/unsafe
-  implementation remains outside this crate. Pure-Lua LPeg avoids adding a native
-  extension-loading boundary. Core builds still have no Cargo dependencies.
+  by this package and crate. The optional Unix terminal feature uses `rustix`,
+  `signal-hook` and a narrow `nix` signal-mask interface. Optional Lua uses safe
+  mlua bindings to a vendored Lua VM; third-party native/unsafe implementation
+  stays outside this crate. Pure-Lua LPeg is the fallback. The opt-in
+  `native-lpeg` feature adds the separate `vis-lpeg-native` workspace crate,
+  whose audited unsafe boundary loads the native LPeg VM; this is an explicit
+  exception to a wholly safe dependency graph, not to this crate's unsafe ban.
+  Arbitrary Lua C-module loading remains disabled. No original C editor
+  implementation is linked into the Rust executable. Core-only builds still
+  have no Cargo dependencies.
 * Parse structural scripts before execution and collect changes against the
   original document before committing them. Invalid scripts and overlapping
   changes must not partially edit the buffer.
@@ -49,12 +51,24 @@ remain the behavioral reference throughout migration.
 
 ## Current status
 
+As of the **2026-10-28 completeness audit**, this remains a staged port. The
+long-line performance task is complete for its measured single-selection
+workflow; overall replacement/release acceptance is **not complete**. Fresh
+validation reports 461 all-feature/all-target tests plus two native-loader tests,
+324 core-only tests, 30/30 Sam fixtures, 142 matching Lua key cases with one
+upstream-disabled exclusion, eight original Lua scripts, and 373/373 LPeg
+comparisons across 160 lexers. The native catalog routes all 178 names (108
+implemented, 70 conditional); this is not a completion percentage. See the
+current status matrix, next work and reproduction notes at the top of
+[`HANDOFF.md`](HANDOFF.md). Dated checkpoints below describe their original runs.
+
 Implemented: binary-safe piece-table storage, stable byte marks, grouped branching
 history, motions and objects, bounded ERE matching with captures, structural
 command groups and address arithmetic, Unix shell pipes, file reads and saves,
 a modal editor state machine, and a Unix terminal backend. Normal, insert,
 replace, visual and command modes, operators, registers, counts, repeat and
-search are available, but key compatibility remains incomplete.
+search are available. The active upstream key corpus passes; conditional
+mode/operator combinations and complete API/platform acceptance remain open.
 
 The host now supports multiple command-line files, horizontal/vertical splits,
 independent marked cursors into shared buffers, global registers with independent
@@ -73,8 +87,9 @@ standard-library-only TZif/POSIX time-zone reader.
 
 Oriented selection sets, stable selection marks and range algebra are implemented.
 The editor supports simultaneous insertion, paste, motions, find, delete/change/
-yank, shift, join, text objects, registers and undo at multiple cursors. Remaining selection
-bindings and some combinations still need migration and differential coverage.
+yank, shift, join, text objects, registers and undo at multiple cursors.
+Combinations outside the audited fixture corpus still need compatibility
+coverage; routing every default binding does not establish all-mode parity.
 
 Per-window native jump lists are implemented: `gs`, `g<`, `g>`, the
 `vis-jumplist-*` actions, JUMP motions (`G`, `gg`, `{`/`}`, `(`/`)`, `%`, `*`/`#`,
@@ -211,8 +226,9 @@ below); paste dot-repeat matches the native editor in the key differential;
 and `wrapcolumn` wrapping now matches the C coordinate oracle (see the
 custom wrapping checkpoint below). Default build/install/
 packaging migration and remaining helper integration are pending. Core piece
-lookup/editing is linear in piece count; UI frames still flatten buffers and
-repaint visible cells. Existing C builds remain the default.
+lookup/editing is linear in piece count. Unchanged UI frames borrow retained
+byte snapshots; edits invalidate them and the renderer still repaints visible
+cells. Existing C builds remain the default.
 
 Language-key translation runs on physical input before macro recording and mode
 bindings, with literal insert/replace input and unmodified replay semantics.
@@ -276,10 +292,14 @@ Known compatibility differences and limits:
   matched literally here. Character case mapping keeps a character unchanged
   when its Unicode mapping would change the byte length, where C leaves the
   selection to its length-preserving `mbstowcs`/`wcstombs` round trip.
-* The Lua `debug` and `ffi` libraries stay unavailable: mlua exposes them only
-  through its unsafe constructor and this crate forbids unsafe code.
-  Configuration that calls `debug.getinfo`, such as vis-lspc, fails while
-  loading; see [`LUA_PORTING.md`](LUA_PORTING.md).
+* The full native Lua `debug` library and `ffi` stay unavailable. A curated
+  safe `debug.getinfo`/`debug.traceback` subset supports ordinary source-location
+  reporting, including vis-lspc; function-argument inspection, hooks, locals
+  and upvalues remain unsupported. See [`LUA_PORTING.md`](LUA_PORTING.md).
+* Complete view parity remains open: the previously recorded two-row Unicode
+  joiner difference at `50G`, persistent C dirty-style behavior, and performance
+  of multi-selection/global-row viewport fallbacks are not closed by the
+  single-selection long-line checkpoint.
 
 Run the interactive editor or a batch transformation:
 
@@ -329,8 +349,10 @@ python3 rust/tools/generate_digraph.py --test
 python3 rust/tests/menu_differential.py
 ```
 
-Full sam/key sweeps deliberately fail while differences or unsupported features
-remain. Unit tests and selected key fixtures passing do not establish full parity.
+The current full Sam sweep matches 30/30 fixtures. The strict full Lua key
+sweep matches 142 cases but exits nonzero for one upstream-disabled fixture;
+that exclusion is not a passing case. Unit tests and fixture sweeps do not
+establish complete editor/API/platform parity.
 
 ## Verified checkpoint (2026-10-25, macOS arm64, second integration)
 
@@ -1012,3 +1034,60 @@ The measurements are in `rust/tests/latency_probe.py`, which reports the
 time from a key burst until the terminal goes quiet. The number of cells the
 cell walk visits is a deterministic measure of the work and does not depend
 on the load of the machine.
+
+## Long-line performance follow-up (2026-10-27)
+
+The earlier frame-cost checkpoints did not establish parity on
+`rust/example.txt`. Its long logical lines exposed eager token collection,
+per-character allocation, and repeated prefix layout for cursor coordinates,
+geometry and line-number sidebars. The current worktree uses lazy tokens,
+byte-local visible layout, incremental line-number lookup and a geometry-only
+measurement pass. The actual-fixture probe is now
+`python3 rust/tests/example_latency.py --rounds 3`; it checks CPU activity as
+well as terminal silence, so it cannot stop in the middle of a slow computation.
+
+Three-round release medians: opening Rust/C 111/106 ms; twenty `j` keys
+84/20 ms (starting Rust 4095 ms); twenty `l` keys after `G` 29/2.4 ms
+(starting Rust 18301 ms). These are substantial improvements, not C parity.
+See `rust/HANDOFF.md` for the complete table, validation, remaining prefix
+walks and the existing two-row Unicode rendering discrepancy.
+
+## Buffered input and core-motion audit (2026-10-27)
+
+The follow-up also removes ordinary per-cell String allocations, shares bounded
+visible cell layouts, counts Lua line numbers incrementally, and batches
+terminal drawing after decoded input, matching C's getkey/ui_draw loop. Geometry
+still updates between keys. A C/Rust PTY test verifies draw counts and cursor
+positions; fullscreen-child feedback remains painted before queued input.
+
+On the actual example, three-round medians are now Rust/C: open 109/105 ms,
+20 `j` keys 15/19 ms, `50G` 4.7/4.0 ms, `G` 6.4/4.2 ms, and 20 `l` keys
+near EOF 3.5/2.4 ms. The extended probe prevents a premature parity claim:
+`gk`/`gj` x10 still cost about 519 ms versus 5 ms, and core slide/window
+motions still rescan the prefix. The goal remains active; HANDOFF.md names
+the exact remaining helpers and includes the full extended table.
+
+
+## Byte-local core actions (2026-10-27, final example checkpoint)
+
+The previous checkpoint's remaining prefix walks are removed from measured
+single-selection screen-row/window/page/slide actions. `view/native.rs` follows
+C's byte start and bounded row matrix, with C's screenful backward scan and
+per-column byte counts. Global-row fallback remains for unmeasured API clients
+and multiple selections. Viewport widths now exclude the number sidebar;
+word-wrap suffix and consumed-read-end accounting match the native view.
+
+Three-round release medians on the actual example are Rust/C: open
+107.34/107.00 ms, `gk` x10 4.47/4.73 ms, `gj` x10 3.82/4.30 ms, H
+3.57/3.51 ms, L 3.75/3.28 ms, and Ctrl-E x20 5.56/4.49 ms. The old Rust
+screen-row times were about 519 ms and Ctrl-E x20 about 697 ms. A separate
+G/L then named slide-down x20 probe measures 5.56/5.06 ms. The physical
+Ctrl-Y no-output result is not an execution-time comparison.
+
+Ctrl-B/F were previously missing aliases, so their old short timings were
+no-ops. They now perform real page actions and agree with C. The actual-example
+performance follow-up is complete for this workflow; see HANDOFF.md for the
+full table, artifacts and remaining scope. Validation: 454 tests pass (one
+ignored), 864 native-view oracle states and 66 real PTY cursor/viewport states
+agree, and Clippy/formatting pass. Existing documented EOF column and Unicode
+rendering differences are kept distinct from passing comparisons.
